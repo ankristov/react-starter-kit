@@ -20,7 +20,8 @@ export default function SubscriptionStatus() {
 
   const subscription = useQuery(api.subscriptions.fetchUserSubscription);
   const subscriptionStatus = useQuery(
-    api.subscriptions.checkUserSubscriptionStatus
+    api.subscriptions.checkUserSubscriptionStatus,
+    { userId: user?.id || "" }
   );
   const createPortalUrl = useAction(api.subscriptions.createCustomerPortalUrl);
 

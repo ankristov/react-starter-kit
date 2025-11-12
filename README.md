@@ -2,6 +2,10 @@
 
 A modern, production-ready SaaS starter template for building full-stack React applications using React Router v7, Convex, Clerk, and Polar.sh. Ready for Vercel deployment with built-in AI chat capabilities.
 
+## Template-only features (not implemented in this build)
+
+The sections below (Features, Tech Stack, Getting Started prerequisites for Clerk/Convex/Polar/OpenAI, Vercel deployment, Architecture details for Auth/Subscriptions/AI Chat, and Environment Variables for those services) describe capabilities that come with the original template but are not wired up in this build. Treat them as a roadmap if you plan to enable authentication, subscriptions, backend, or AI chat later.
+
 ## Features
 
 - 🚀 **React Router v7** - Modern full-stack React framework with SSR
@@ -84,7 +88,7 @@ POLAR_WEBHOOK_SECRET=your_polar_webhook_secret_here
 OPENAI_API_KEY=your_openai_api_key_here
 
 # Frontend URL for redirects
-FRONTEND_URL=http://localhost:5173
+FRONTEND_URL=http://localhost:5174
 ```
 
 4. Initialize Convex:
@@ -105,7 +109,11 @@ Start the development server with HMR:
 npm run dev
 ```
 
-Your application will be available at `http://localhost:5173`.
+Your application will be available at `http://localhost:5174` (configured in `vite.config.ts`).
+
+**Note:** With Vite's Hot Module Replacement (HMR), most changes appear automatically. If changes don't appear:
+1. Try a hard refresh in your browser (Cmd+Shift+R on Mac, Ctrl+Shift+R on Windows)
+2. Use the restart script: `./scripts/dev_restart.sh` (or `bash scripts/dev_restart.sh`)
 
 ## Building for Production
 
@@ -129,13 +137,23 @@ The `react-router.config.ts` includes the Vercel preset for seamless deployment.
 
 ### Docker Deployment
 
-To build and run using Docker:
+Production-ready Docker build (nginx serving Vite build):
 
 ```bash
-docker build -t my-app .
+# 1) Build image
+docker build -t forcefield-app .
 
-# Run the container
-docker run -p 3000:3000 my-app
+# 2) Run container (serve on localhost:8080)
+docker run --rm -p 8080:80 forcefield-app
+
+# 3) Open the app
+# http://localhost:8080
+
+# Optional: run in background and name the container
+docker run -d --name forcefield -p 8080:80 forcefield-app
+
+# Stop and remove
+docker stop forcefield && docker rm forcefield
 ```
 
 The containerized application can be deployed to any platform that supports Docker:
@@ -242,10 +260,82 @@ Make sure to deploy the output of `npm run build`
 
 ## Scripts
 
-- `npm run dev` - Start development server
-- `npm run build` - Build for production
-- `npm run start` - Start production server
+- `npm run dev` - Start development server (Vite) and open browser
+- `npm run build` - Build for production (outputs static files to `dist/`)
+- `npm run start` - Start production server (not used in Docker nginx build)
+- `./scripts/dev_restart.sh` - Restart the development server (kills existing processes and starts fresh)
+
+## Run and Shutdown (Local)
+
+Development
+```bash
+npm install
+npm run dev
+# App: http://localhost:5174
+```
+
+Production preview (without Docker)
+```bash
+npm run build
+npm run preview
+# App: http://localhost:4173
+```
+
+Shutdown
+- Ctrl+C in the terminal to stop dev/preview
+- For Docker: `docker stop <container>` and optionally `docker rm <container>`
+
+## Where to change defaults
+
+- Defaults for physics, visuals, performance, collisions, color filter are defined in:
+  - `src/store/forceFieldStore.ts` → the `defaultSettings` object
+    - `healingFactor` (viscosity)
+    - `restorationForce`
+    - `forceType` and per-force settings under `forceSettings` (e.g., `repulsion.strength`, `repulsion.radius`)
+    - `performance.adaptiveEnabled`
+    - `partialHealing.enabled`
+    - `colorFilterSettings` (`enabled`, `filterMode`, `colorTolerance`)
+
+- Defaults for “Force Impact” quick action UI are in:
+  - `src/components/ControlPanel.tsx` → initial state for `pulseSelected` (e.g., `'tornado'`) and related pulse settings
+
+- UI control layout and tooltips live in:
+  - `src/components/ControlPanel.tsx` (Main/Presets/Colors/Visuals/Performance/Healing/Collisions)
+  - `src/components/ForceTypeControls.tsx` (per-force sliders)
+  - `src/components/ColorFilter.tsx` (color clusters)
 - `npm run typecheck` - Run TypeScript checks
+
+## Future feature ideas
+
+### Audio‑reactive forces (plan)
+
+- Analysis engine (Web Audio API)
+  - `getUserMedia` (mic) or `<audio>` source → `AudioContext` → `AnalyserNode`.
+  - Compute RMS (loudness), 3-band energies (bass/mid/treble), optional beat detection.
+  - Smooth and expose features at ~60 Hz: `{ rms, bass, mid, treble, beat }`.
+
+- Store additions
+  - `audioReactive`: `{ enabled, source: 'mic'|'file'|'url', sensitivity, smoothing, bandGains, mappingPreset, beatToPulseType, pulseStrengthScale }`.
+  - `audioFeatures` to share current features; actions to start/stop analyzer.
+
+- UI (ControlPanel → “Audio” accordion)
+  - Source selector (Mic/File/URL), Start/Stop.
+  - Sliders: Sensitivity, Smoothing, Bass/Mid/Treble gains.
+  - Mapping preset dropdown; mini spectrum + RMS meter; beat indicator.
+
+- Engine modulation
+  - In the animation loop, read `audioFeatures` and derive modifiers (e.g., `strength`, `radius`, `frequency`).
+  - Apply via `engine.updateSettings(...)` for minimal numeric changes, or `engine.setExternalModulation(mod)`.
+
+- Beat-driven pulses (optional)
+  - On detected `beat`, call `enqueuePulse({ type, strength, durationMs })` with scaling from RMS.
+
+- Performance & quality
+  - Use `AnalyserNode.smoothingTimeConstant` + EMA; clamp and lerp parameter changes.
+  - Modest FFT size (e.g., 2048); poll ~60 Hz.
+
+- Optional: include audio in video export
+  - Merge canvas and audio tracks: `new MediaStream([...canvasStream.getTracks(), ...audioStream.getAudioTracks()])`.
 
 ## Contributing
 

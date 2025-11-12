@@ -11,6 +11,7 @@ const menuItems = [
   { name: "Features", href: "#features" },
   { name: "Team", href: "#team" },
   { name: "Pricing", href: "#pricing" },
+  { name: "Force Field", href: "/forcefield" },
 ];
 
 export const Navbar = ({
@@ -38,6 +39,9 @@ export const Navbar = ({
           block: "start",
         });
       }
+    } else if (href.startsWith("/")) {
+      // Handle internal navigation
+      window.location.href = href;
     }
     setMenuState(false); // Close mobile menu
   }, []);
@@ -88,12 +92,22 @@ export const Navbar = ({
               <ul className="flex gap-8 text-sm">
                 {menuItems.map((item, index) => (
                   <li key={index}>
-                    <div
-                      onClick={() => handleNavClick(item.href)}
-                      className="hover:cursor-pointer text-muted-foreground block duration-150 transition-colors"
-                    >
-                      <span>{item.name}</span>
-                    </div>
+                    {item.href.startsWith("/") ? (
+                      <Link
+                        to={item.href}
+                        className="hover:cursor-pointer text-muted-foreground block duration-150 transition-colors"
+                        onClick={() => setMenuState(false)}
+                      >
+                        <span>{item.name}</span>
+                      </Link>
+                    ) : (
+                      <div
+                        onClick={() => handleNavClick(item.href)}
+                        className="hover:cursor-pointer text-muted-foreground block duration-150 transition-colors"
+                      >
+                        <span>{item.name}</span>
+                      </div>
+                    )}
                   </li>
                 ))}
               </ul>
@@ -104,12 +118,22 @@ export const Navbar = ({
                 <ul className="space-y-6 text-base">
                   {menuItems.map((item, index) => (
                     <li key={index}>
-                      <button
-                        onClick={() => handleNavClick(item.href)}
-                        className="text-muted-foreground hover:cursor-pointer  block duration-150 transition-colors w-full text-left"
-                      >
-                        <span>{item.name}</span>
-                      </button>
+                      {item.href.startsWith("/") ? (
+                        <Link
+                          to={item.href}
+                          className="text-muted-foreground hover:cursor-pointer block duration-150 transition-colors w-full text-left"
+                          onClick={() => setMenuState(false)}
+                        >
+                          <span>{item.name}</span>
+                        </Link>
+                      ) : (
+                        <button
+                          onClick={() => handleNavClick(item.href)}
+                          className="text-muted-foreground hover:cursor-pointer block duration-150 transition-colors w-full text-left"
+                        >
+                          <span>{item.name}</span>
+                        </button>
+                      )}
                     </li>
                   ))}
                 </ul>

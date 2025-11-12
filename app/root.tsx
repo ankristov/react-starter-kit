@@ -15,7 +15,11 @@ import type { Route } from "./+types/root";
 import "./app.css";
 import { Analytics } from "@vercel/analytics/react";
 
-const convex = new ConvexReactClient(import.meta.env.VITE_CONVEX_URL as string);
+// Lazy initialize Convex client to avoid SSR issues
+let convex: ConvexReactClient | null = null;
+if (typeof window !== 'undefined' && import.meta.env.VITE_CONVEX_URL) {
+  convex = new ConvexReactClient(import.meta.env.VITE_CONVEX_URL as string);
+}
 
 export async function loader(args: Route.LoaderArgs) {
   return rootAuthLoader(args);
@@ -89,9 +93,13 @@ export default function App({ loaderData }: Route.ComponentProps) {
       signUpFallbackRedirectUrl="/"
       signInFallbackRedirectUrl="/"
     >
-      <ConvexProviderWithClerk client={convex} useAuth={useAuth}>
+      {convex ? (
+        <ConvexProviderWithClerk client={convex} useAuth={useAuth}>
+          <Outlet />
+        </ConvexProviderWithClerk>
+      ) : (
         <Outlet />
-      </ConvexProviderWithClerk>
+      )}
     </ClerkProvider>
   );
 }
