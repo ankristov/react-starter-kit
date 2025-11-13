@@ -55,6 +55,8 @@ export interface ForceFieldSettings {
   wallsEnabled: boolean;
   canvasBackgroundColor: string;
   imageScale?: number; // scale factor applied to image-to-particle mapping
+  particleOpacity: number; // opacity of particles (0-1, default 1.0)
+  backgroundImage: BackgroundImageSettings | null;
   colorFilterSettings: ColorFilterSettings; // Add color filter settings
   performance?: PerformanceSettings;
   partialHealing?: PartialHealingSettings;
@@ -173,7 +175,8 @@ export type ForcePulseType =
   | 'ringBurst'
   | 'edgeBurst'
   | 'multiBurst'
-  | 'quake';
+  | 'quake'
+  | 'randomize';
 
 export interface ForcePulse {
   id: string;
@@ -185,10 +188,38 @@ export interface ForcePulse {
   clockwise?: boolean; // for tornado
   frequency?: number; // for noise/ripple
   chaos?: number; // for noise
+  // Easing controls
+  easeIn?: number; // 0-1, how much to ease in at start (0 = no ease, 1 = full ease)
+  easeOut?: number; // 0-1, how much to ease out at end (0 = no ease, 1 = full ease)
+  easeType?: 'linear' | 'ease-in' | 'ease-out' | 'ease-in-out' | 'ease-in-cubic' | 'ease-out-cubic' | 'ease-in-out-cubic' | 'ease-in-quad' | 'ease-out-quad' | 'ease-in-out-quad'; // Type of easing curve
+  // For randomize - timing controls
+  scatterSpeed?: number; // speed multiplier for moving to random positions (default 3.0)
+  scatterDurationPercent?: number; // percentage of total duration for scatter phase (default 30)
+  holdTimeMs?: number; // time to hold at random positions before returning (default 500ms)
+  returnDurationPercent?: number; // percentage of total duration for return phase (default: remaining after scatter + hold)
+  returnSpeed?: number; // speed multiplier for returning to original positions (default 2.0) - not used anymore but kept for compatibility
+  // Type-specific parameters
+  radius?: number; // for burst, implosion, shockwave, etc.
+  intensity?: number; // for supernova, quake, etc.
+  waveCount?: number; // for ripple, waveLeft, waveUp
+  spiralTurns?: number; // for spiralIn, spiralOut
 }
 
 export interface MousePosition {
   x: number;
   y: number;
   active: boolean;
+}
+
+export interface BackgroundImageSettings {
+  imageDataUrl: string | null;
+  scale: number;
+  positionX: number;
+  positionY: number;
+  width: number | null;
+  height: number | null;
+  rotation: number;
+  aspectRatioLock: boolean;
+  originalWidth: number;
+  originalHeight: number;
 } 

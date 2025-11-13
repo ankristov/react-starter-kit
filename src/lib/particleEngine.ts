@@ -8,10 +8,13 @@ export class ParticleEngine {
   private canvasWidth: number = 800;
   private canvasHeight: number = 600;
   private forceDisabled: boolean = false;
+  private forceWasJustEnabled: boolean = false; // Track when force is re-enabled
   private lastMouseX: number = 0;
   private lastMouseY: number = 0;
   private mouseHasMoved: boolean = false;
   private activePulses: Array<ForcePulse & { id: string; start: number } > = [];
+  // For randomize effect: store random target positions per particle
+  private randomizeTargets: Map<string, Map<number, { x: number; y: number }>> = new Map();
 
   constructor(settings: ForceFieldSettings) {
     this.settings = settings;
@@ -23,7 +26,12 @@ export class ParticleEngine {
   }
 
   setForceDisabled(disabled: boolean): void {
+    const wasDisabled = this.forceDisabled;
     this.forceDisabled = disabled;
+    // If force was just re-enabled (was disabled, now enabled), mark it
+    if (wasDisabled && !disabled) {
+      this.forceWasJustEnabled = true;
+    }
   }
 
   generateParticlesFromImage(imageData: ImageData): Particle[] {
@@ -138,7 +146,23 @@ export class ParticleEngine {
 
   enqueuePulse(pulse: Omit<ForcePulse, 'id'>): void {
     const id = Math.random().toString(36).slice(2);
-    this.activePulses.push({ ...(pulse as any), id, start: performance.now() });
+    const now = performance.now();
+    this.activePulses.push({ ...(pulse as any), id, start: now });
+    
+    // For randomize effect, assign random target positions to all particles
+    if (pulse.type === 'randomize') {
+      const targets = new Map<number, { x: number; y: number }>();
+      this.particles.forEach((particle, index) => {
+        if (particle.visible !== false) {
+          // Random position within canvas bounds with some margin
+          const margin = 50;
+          const randomX = margin + Math.random() * (this.canvasWidth - 2 * margin);
+          const randomY = margin + Math.random() * (this.canvasHeight - 2 * margin);
+          targets.set(index, { x: randomX, y: randomY });
+        }
+      });
+      this.randomizeTargets.set(id, targets);
+    }
   }
 
   updateParticles(): void {
@@ -219,7 +243,72 @@ export class ParticleEngine {
         let ax = 0; let ay = 0;
         for (const p of this.activePulses) {
           const t = (now - p.start);
-          const k = Math.max(0, 1 - t / p.durationMs);
+          const progress = Math.min(1, t / p.durationMs);
+          let k = 1 - progress; // Base strength multiplier (1 at start, 0 at end)
+          
+          // Apply ease in/out if specified
+          if ((p.easeIn && p.easeIn > 0) || (p.easeOut && p.easeOut > 0)) {
+            const easeType = p.easeType ?? 'linear';
+            const easeIn = p.easeIn ?? 0;
+            const easeOut = p.easeOut ?? 0;
+            let easedProgress = progress;
+            
+            // Apply easing curve based on type
+            switch (easeType) {
+              case 'linear':
+                // No curve modification, just use progress
+                break;
+              case 'ease-in':
+                easedProgress = easedProgress * easedProgress;
+                break;
+              case 'ease-out':
+                easedProgress = 1 - (1 - easedProgress) * (1 - easedProgress);
+                break;
+              case 'ease-in-out':
+                easedProgress = easedProgress < 0.5
+                  ? 2 * easedProgress * easedProgress
+                  : 1 - Math.pow(-2 * easedProgress + 2, 2) / 2;
+                break;
+              case 'ease-in-quad':
+                easedProgress = easedProgress * easedProgress;
+                break;
+              case 'ease-out-quad':
+                easedProgress = 1 - (1 - easedProgress) * (1 - easedProgress);
+                break;
+              case 'ease-in-out-quad':
+                easedProgress = easedProgress < 0.5
+                  ? 2 * easedProgress * easedProgress
+                  : 1 - Math.pow(-2 * easedProgress + 2, 2) / 2;
+                break;
+              case 'ease-in-cubic':
+                easedProgress = easedProgress * easedProgress * easedProgress;
+                break;
+              case 'ease-out-cubic':
+                easedProgress = 1 - Math.pow(1 - easedProgress, 3);
+                break;
+              case 'ease-in-out-cubic':
+                easedProgress = easedProgress < 0.5
+                  ? 4 * easedProgress * easedProgress * easedProgress
+                  : 1 - Math.pow(-2 * easedProgress + 2, 3) / 2;
+                break;
+            }
+            
+            // Apply ease in/out amounts (blend between linear and eased)
+            if (easeIn > 0) {
+              const linearStart = progress;
+              const easedStart = easedProgress;
+              easedProgress = linearStart * (1 - easeIn) + easedStart * easeIn;
+            }
+            
+            if (easeOut > 0) {
+              const linearEnd = progress;
+              const easedEnd = easedProgress;
+              easedProgress = linearEnd * (1 - easeOut) + easedEnd * easeOut;
+            }
+            
+            k = 1 - easedProgress;
+            k = Math.max(0, Math.min(1, k));
+          }
           if (k <= 0) continue;
           switch (p.type) {
             case 'gravity': {
@@ -272,16 +361,27 @@ export class ParticleEngine {
               break;
             }
             case 'burst': {
-              const cx = this.canvasWidth * 0.5; const cy = this.canvasHeight * 0.5;
-              const dx = particle.x - cx; const dy = particle.y - cy; const r = Math.hypot(dx, dy) + 1e-3;
-              const f = p.strength * 0.4 * k;
+              const ox = p.origin?.normalized ? p.origin.x * this.canvasWidth : (p.origin?.x ?? this.canvasWidth * 0.5);
+              const oy = p.origin?.normalized ? p.origin.y * this.canvasHeight : (p.origin?.y ?? this.canvasHeight * 0.5);
+              const dx = particle.x - ox; const dy = particle.y - oy; const r = Math.hypot(dx, dy) + 1e-3;
+              const intensity = p.intensity ?? 1.0;
+              const radius = p.radius ?? 100;
+              // Apply distance-based falloff if radius is specified
+              const distanceFactor = radius > 0 ? Math.max(0, 1 - r / radius) : 1;
+              const f = p.strength * 0.4 * intensity * distanceFactor * k;
               ax += (dx / r) * f; ay += (dy / r) * f;
               break;
             }
             case 'implosion': {
-              const cx = this.canvasWidth * 0.5; const cy = this.canvasHeight * 0.5;
-              const dx = particle.x - cx; const dy = particle.y - cy; const r = Math.hypot(dx, dy) + 1e-3;
-              const f = p.strength * 0.4 * k;
+              const ox = p.origin?.normalized ? p.origin.x * this.canvasWidth : (p.origin?.x ?? this.canvasWidth * 0.5);
+              const oy = p.origin?.normalized ? p.origin.y * this.canvasHeight : (p.origin?.y ?? this.canvasHeight * 0.5);
+              const dx = particle.x - ox; const dy = particle.y - oy; const r = Math.hypot(dx, dy) + 1e-3;
+              const intensity = p.intensity ?? 1.0;
+              const radius = p.radius ?? 100;
+              // Apply distance-based falloff if radius is specified
+              const distanceFactor = radius > 0 ? Math.max(0, 1 - r / radius) : 1;
+              const f = p.strength * 0.4 * intensity * distanceFactor * k;
+              // Implosion pulls particles IN (opposite direction from burst)
               ax -= (dx / r) * f; ay -= (dy / r) * f;
               break;
             }
@@ -415,13 +515,65 @@ export class ParticleEngine {
               ay += (Math.random() - 0.5) * p.strength * 0.05 * k;
               break;
             }
+            case 'randomize': {
+              const targets = this.randomizeTargets.get(p.id);
+              if (!targets) break;
+              
+              const particleIndex = this.particles.indexOf(particle);
+              const target = targets.get(particleIndex);
+              if (!target) break;
+              
+              const scatterSpeed = p.scatterSpeed ?? 3.0;
+              const holdTimeMs = p.holdTimeMs ?? 500;
+              const scatterDurationPercent = p.scatterDurationPercent ?? 30;
+              const returnDurationPercent = p.returnDurationPercent ?? 40;
+              
+              // Calculate phases with user-defined percentages
+              const scatterDuration = p.durationMs * (scatterDurationPercent / 100);
+              const holdStart = scatterDuration;
+              const holdEnd = holdStart + holdTimeMs;
+              const returnDuration = p.durationMs * (returnDurationPercent / 100);
+              const returnStart = p.durationMs - returnDuration;
+              
+              if (t < scatterDuration) {
+                // Scatter phase: move quickly to random position
+                const dx = target.x - particle.x;
+                const dy = target.y - particle.y;
+                const distance = Math.hypot(dx, dy);
+                if (distance > 1) {
+                  // Apply ease in if specified
+                  const easeInFactor = p.easeIn ? 1 - (1 - t / scatterDuration) * p.easeIn : 1;
+                  const speed = scatterSpeed * p.strength * 0.1 * easeInFactor;
+                  ax += (dx / distance) * speed;
+                  ay += (dy / distance) * speed;
+                }
+              } else if (t < holdEnd) {
+                // Hold phase: stay at random position (minimal movement)
+                const dx = target.x - particle.x;
+                const dy = target.y - particle.y;
+                const distance = Math.hypot(dx, dy);
+                if (distance > 1) {
+                  // Small correction force to keep particles at target
+                  const holdForce = 0.5;
+                  ax += (dx / distance) * holdForce;
+                  ay += (dy / distance) * holdForce;
+                }
+              } else if (t >= returnStart && t < p.durationMs) {
+                // Return phase: let restoration force handle smooth return
+                // Apply ease out if specified (affects restoration force multiplier)
+                // The restoration force will naturally return particles
+                // Ease out is handled by the restoration force system
+              }
+              break;
+            }
           }
         }
         particle.vx += ax; particle.vy += ay;
       }
 
       // Apply forces based on mouse position (allow continuous mode to sustain force without movement)
-      if (mouseActive && (this.mouseHasMoved || continuous)) {
+      // Also apply if force was just re-enabled to ensure immediate response
+      if (mouseActive && (this.mouseHasMoved || continuous || this.forceWasJustEnabled)) {
         const dx = mouseX - particle.x;
         const dy = mouseY - particle.y;
         const distanceSquared = dx * dx + dy * dy;
@@ -550,9 +702,19 @@ export class ParticleEngine {
     
     // Reset mouse movement flag after processing all particles
     this.mouseHasMoved = false;
+    // Reset force just enabled flag after first frame
+    this.forceWasJustEnabled = false;
     // Purge expired pulses
     if (this.activePulses.length > 0) {
-      this.activePulses = this.activePulses.filter(p => (now - p.start) < p.durationMs);
+      const before = this.activePulses.length;
+      this.activePulses = this.activePulses.filter(p => {
+        const isActive = (now - p.start) < p.durationMs;
+        if (!isActive && p.type === 'randomize') {
+          // Clean up randomize targets when pulse expires
+          this.randomizeTargets.delete(p.id);
+        }
+        return isActive;
+      });
     }
   }
 

@@ -129,4 +129,45 @@ export function downloadCanvas(canvas: HTMLCanvasElement, filename: string): voi
   link.download = filename;
   link.href = canvas.toDataURL();
   link.click();
+}
+
+export function detectFormatMismatch(
+  imageWidth: number,
+  imageHeight: number,
+  canvasWidth: number,
+  canvasHeight: number
+): { aspectRatioMismatch: boolean; dimensionMismatch: boolean } {
+  const imageAspect = imageWidth / imageHeight;
+  const canvasAspect = canvasWidth / canvasHeight;
+  const aspectRatioMismatch = Math.abs(imageAspect - canvasAspect) > 0.01;
+  const dimensionMismatch = imageWidth !== canvasWidth || imageHeight !== canvasHeight;
+  
+  return { aspectRatioMismatch, dimensionMismatch };
+}
+
+// Convert ImageData to base64 data URL
+export function imageDataToDataUrl(imageData: ImageData): string {
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d')!;
+  canvas.width = imageData.width;
+  canvas.height = imageData.height;
+  ctx.putImageData(imageData, 0, 0);
+  return canvas.toDataURL();
+}
+
+// Convert base64 data URL to ImageData
+export function dataUrlToImageData(dataUrl: string): Promise<ImageData> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const imageData = getImageData(img);
+        resolve(imageData);
+      } catch (error) {
+        reject(error);
+      }
+    };
+    img.onerror = reject;
+    img.src = dataUrl;
+  });
 } 

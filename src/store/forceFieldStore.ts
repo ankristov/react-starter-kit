@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { Particle, ForceFieldSettings, MousePosition, ControlPanelSettings, ColorInfo, ColorGroup, ForcePulse, ForcePulseType, ExportSettings } from '../types/particle';
+import type { Particle, ForceFieldSettings, MousePosition, ControlPanelSettings, ColorInfo, ColorGroup, ForcePulse, ForcePulseType, ExportSettings, BackgroundImageSettings } from '../types/particle';
 
 interface ForceFieldState {
   particles: Particle[];
@@ -12,9 +12,11 @@ interface ForceFieldState {
   exportSettings: ExportSettings;
   isRecording: boolean;
   recordingUrl: string | null;
+  recordingMimeType: string | null; // Store the actual MIME type used for recording
   setExportSettings: (s: Partial<ExportSettings>) => void;
   setIsRecording: (b: boolean) => void;
   setRecordingUrl: (url: string | null) => void;
+  setRecordingMimeType: (mime: string | null) => void;
   // Recorder control wiring (canvas registers callbacks)
   setRecorderControl: (ctrl: { start: () => void; stop: () => void } | null) => void;
   startRecording: () => void;
@@ -44,10 +46,17 @@ interface ForceFieldState {
   loadPreset: (name: string) => void;
   deletePreset: (name: string) => void;
   setSelectedPreset: (name: string | null) => void;
+  // Default state actions
+  saveDefaultState: (imageDataUrl?: string | null) => void;
+  loadDefaultState: () => Promise<{ success: boolean; imageDataUrl: string | null }>;
   // Quick actions
   resetToDefaults: () => void;
   // Force pulses
   enqueuePulse: (pulse: Omit<ForcePulse, 'id'>) => void;
+  // Background image
+  setBackgroundImage: (settings: BackgroundImageSettings | null) => void;
+  updateBackgroundImage: (updates: Partial<BackgroundImageSettings>) => void;
+  setParticleOpacity: (opacity: number) => void;
 }
 
 // Default settings
@@ -68,6 +77,8 @@ const defaultSettings: ForceFieldSettings = {
   wallsEnabled: true,
   canvasBackgroundColor: '#0f0f23',
   imageScale: 1,
+  particleOpacity: 1.0,
+  backgroundImage: null,
   visual: {
     trailsEnabled: false,
     trailFade: 0.08,
@@ -99,6 +110,36 @@ const defaultSettings: ForceFieldSettings = {
     filterMode: 'show',
     colorTolerance: 10, // Number of color clusters to create (1-20)
   },
+};
+
+// Default state storage helpers
+const DEFAULT_STATE_KEY = 'forcefield-default-state';
+
+interface DefaultState {
+  settings: ControlPanelSettings;
+  particles: Particle[];
+  imageDataUrl: string | null; // Base64 encoded image data
+  canvasSize: { width: number; height: number } | null;
+  fileHash: string | null;
+}
+
+const saveDefaultState = (state: DefaultState) => {
+  try {
+    localStorage.setItem(DEFAULT_STATE_KEY, JSON.stringify(state));
+  } catch (e) {
+    console.warn('Failed to save default state:', e);
+  }
+};
+
+const loadDefaultState = (): DefaultState | null => {
+  try {
+    const saved = localStorage.getItem(DEFAULT_STATE_KEY);
+    if (!saved) return null;
+    return JSON.parse(saved);
+  } catch (e) {
+    console.warn('Failed to load default state:', e);
+    return null;
+  }
 };
 
 // Preset storage helpers
@@ -183,7 +224,7 @@ const loadUIState = () => {
       const parsed = JSON.parse(saved);
       return {
         desiredCanvasSize: parsed.desiredCanvasSize || null,
-        exportSettings: parsed.exportSettings || { preset: 'instagramReel', width: 1080, height: 1920, fps: 60, durationSec: 5, mimeType: 'video/webm;codecs=vp9' },
+        exportSettings: parsed.exportSettings || { preset: 'instagramReel', width: 1080, height: 1920, fps: 60, durationSec: 5, mimeType: 'video/mp4' },
       };
     }
   } catch (error) {
@@ -191,7 +232,7 @@ const loadUIState = () => {
   }
   return {
     desiredCanvasSize: null,
-    exportSettings: { preset: 'instagramReel', width: 1080, height: 1920, fps: 60, durationSec: 5, mimeType: 'video/webm;codecs=vp9' },
+    exportSettings: { preset: 'instagramReel', width: 1080, height: 1920, fps: 60, durationSec: 5, mimeType: 'video/mp4' },
   };
 };
 
@@ -225,6 +266,8 @@ const saveControlSettings = (settings: ForceFieldSettings, fileHash?: string) =>
       wallsEnabled: settings.wallsEnabled,
       canvasBackgroundColor: settings.canvasBackgroundColor,
       imageScale: settings.imageScale,
+      particleOpacity: settings.particleOpacity,
+      backgroundImage: settings.backgroundImage,
       colorFilterSettings: settings.colorFilterSettings,
       performance: settings.performance,
       partialHealing: settings.partialHealing,
@@ -251,12 +294,15 @@ const saveControlSettings = (settings: ForceFieldSettings, fileHash?: string) =>
         healingFactor: settings.healingFactor,
         restorationForce: settings.restorationForce,
         wallsEnabled: settings.wallsEnabled,
-        canvasBackgroundColor: settings.canvasBackgroundColor,
-        colorFilterSettings: settings.colorFilterSettings,
-        performance: settings.performance,
-        partialHealing: settings.partialHealing,
-        visual: settings.visual,
-        collisions: settings.collisions,
+      canvasBackgroundColor: settings.canvasBackgroundColor,
+      imageScale: settings.imageScale,
+      particleOpacity: settings.particleOpacity,
+      backgroundImage: settings.backgroundImage,
+      colorFilterSettings: settings.colorFilterSettings,
+      performance: settings.performance,
+      partialHealing: settings.partialHealing,
+      visual: settings.visual,
+      collisions: settings.collisions,
       };
       localStorage.setItem(key, JSON.stringify(controlSettings));
     } catch (retryError) {
@@ -278,6 +324,7 @@ export const useForceFieldStore = create<ForceFieldState>((set, get) => ({
   exportSettings: initialUIState.exportSettings,
   isRecording: false,
   recordingUrl: null,
+  recordingMimeType: null,
   setExportSettings: (s) => {
     const newExportSettings = { ...get().exportSettings, ...s };
     set({ exportSettings: newExportSettings });
@@ -285,6 +332,7 @@ export const useForceFieldStore = create<ForceFieldState>((set, get) => ({
   },
   setIsRecording: (b) => set({ isRecording: b }),
   setRecordingUrl: (url) => set({ recordingUrl: url }),
+  setRecordingMimeType: (mime) => set({ recordingMimeType: mime }),
   // recorder control storage (not persisted)
   _recorderControl: undefined as any,
   setRecorderControl: (ctrl) => { (get() as any)._recorderControl = ctrl; },
@@ -454,6 +502,57 @@ export const useForceFieldStore = create<ForceFieldState>((set, get) => ({
       set({ presetNames: names, selectedPreset: fallback });
     }
   },
+  saveDefaultState: (imageDataUrl?: string | null) => {
+    const state = get();
+    const controlSettings: ControlPanelSettings = {
+      particleDensity: state.settings.particleDensity,
+      particleShape: state.settings.particleShape,
+      forceType: state.settings.forceType,
+      combineForces: state.settings.combineForces,
+      activeForces: state.settings.activeForces,
+      continuousMode: state.settings.continuousMode,
+      forceSettings: state.settings.forceSettings,
+      healingFactor: state.settings.healingFactor,
+      restorationForce: state.settings.restorationForce,
+      wallsEnabled: state.settings.wallsEnabled,
+      canvasBackgroundColor: state.settings.canvasBackgroundColor,
+      imageScale: state.settings.imageScale,
+      particleOpacity: state.settings.particleOpacity,
+      backgroundImage: state.settings.backgroundImage,
+      colorFilterSettings: state.settings.colorFilterSettings,
+      performance: state.settings.performance,
+      partialHealing: state.settings.partialHealing,
+      visual: state.settings.visual,
+      collisions: state.settings.collisions,
+    };
+    
+    const defaultState: DefaultState = {
+      settings: controlSettings,
+      particles: JSON.parse(JSON.stringify(state.particles)), // Deep copy particles
+      imageDataUrl: imageDataUrl ?? null,
+      canvasSize: state.desiredCanvasSize,
+      fileHash: state.currentFileHash,
+    };
+    
+    saveDefaultState(defaultState);
+  },
+  loadDefaultState: async () => {
+    const saved = loadDefaultState();
+    if (!saved) return { success: false, imageDataUrl: null };
+    
+    // Restore settings
+    const next: ForceFieldSettings = { ...defaultSettings, ...saved.settings } as ForceFieldSettings;
+    set({ 
+      settings: next, 
+      particles: JSON.parse(JSON.stringify(saved.particles)), // Deep copy particles
+      desiredCanvasSize: saved.canvasSize,
+      currentFileHash: saved.fileHash,
+      particleCount: saved.particles.length,
+    });
+    saveControlSettings(next, saved.fileHash || undefined);
+    
+    return { success: true, imageDataUrl: saved.imageDataUrl };
+  },
   setSelectedPreset: (name: string | null) => set({ selectedPreset: name }),
   // Reset all settings to defaults (respecting file hash persistence)
   resetToDefaults: () => {
@@ -472,5 +571,24 @@ export const useForceFieldStore = create<ForceFieldState>((set, get) => ({
     } else {
       console.warn('Engine not ready for pulses');
     }
+  },
+  // Background image actions
+  setBackgroundImage: (settings) => {
+    const updatedSettings = { ...get().settings, backgroundImage: settings };
+    set({ settings: updatedSettings });
+    saveControlSettings(updatedSettings, get().currentFileHash || undefined);
+  },
+  updateBackgroundImage: (updates) => {
+    const state = get();
+    if (!state.settings.backgroundImage) return;
+    const updatedBackgroundImage = { ...state.settings.backgroundImage, ...updates };
+    const updatedSettings = { ...state.settings, backgroundImage: updatedBackgroundImage };
+    set({ settings: updatedSettings });
+    saveControlSettings(updatedSettings, state.currentFileHash || undefined);
+  },
+  setParticleOpacity: (opacity) => {
+    const updatedSettings = { ...get().settings, particleOpacity: opacity };
+    set({ settings: updatedSettings });
+    saveControlSettings(updatedSettings, get().currentFileHash || undefined);
   },
 })); 

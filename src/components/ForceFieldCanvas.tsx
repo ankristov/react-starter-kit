@@ -11,9 +11,13 @@ export function ForceFieldCanvas() {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const recordedChunksRef = useRef<Blob[]>([]);
   const restoreSizeRef = useRef<{ width: number; height: number } | null>(null);
+  const backgroundImageRef = useRef<HTMLImageElement | null>(null);
   const [canvasSize, setCanvasSize] = useState({ width: 800, height: 600 });
   const [isForceDisabled, setIsForceDisabled] = useState(false);
   const fps = useFps(500);
+  // Frame rate limiting for recording
+  const recordingFrameTimeRef = useRef<number>(0);
+  const lastFrameTimeRef = useRef<number>(0);
   
   const {
     settings,
@@ -25,8 +29,10 @@ export function ForceFieldCanvas() {
     setIsAnimating,
     desiredCanvasSize,
     exportSettings,
+    isRecording,
     setIsRecording,
     setRecordingUrl,
+    setRecordingMimeType,
     setDesiredCanvasSize,
     setRecorderControl,
   } = useForceFieldStore();
@@ -97,9 +103,20 @@ export function ForceFieldCanvas() {
   // Recording controls registered into store
   useEffect(() => {
     const pickMime = () => {
-      const candidates = [exportSettings.mimeType || 'video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
-      for (const m of candidates) { if ((window as any).MediaRecorder && MediaRecorder.isTypeSupported(m)) return m; }
-      return 'video/webm';
+      // Try MP4 formats first, then fall back to WebM
+      const candidates = [
+        exportSettings.mimeType || 'video/mp4',
+        'video/mp4;codecs=h264',
+        'video/mp4;codecs=avc1.42E01E',
+        'video/mp4;codecs=avc1.4D001E',
+        'video/webm;codecs=vp9',
+        'video/webm;codecs=vp8',
+        'video/webm'
+      ];
+      for (const m of candidates) { 
+        if ((window as any).MediaRecorder && MediaRecorder.isTypeSupported(m)) return m; 
+      }
+      return 'video/webm'; // Final fallback
     };
 
     const start = () => {
@@ -107,28 +124,56 @@ export function ForceFieldCanvas() {
       try {
         // snapshot desired size to restore later
         restoreSizeRef.current = desiredCanvasSize ? { ...desiredCanvasSize } : { ...canvasSize };
+        // Reset frame timing for recording
+        lastFrameTimeRef.current = performance.now();
+        recordingFrameTimeRef.current = 1000 / (exportSettings.fps || 60);
         // Ensure a small delay so canvas has resized before capture
         setTimeout(() => {
-          const stream = canvasRef.current!.captureStream(exportSettings.fps || 60);
+          const targetFps = exportSettings.fps || 60;
+          const stream = canvasRef.current!.captureStream(targetFps);
           const mime = pickMime();
-          const mr = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 5_000_000 });
+          // Increase bitrate for better quality, adjust based on resolution
+          const width = exportSettings.width || canvasSize.width;
+          const height = exportSettings.height || canvasSize.height;
+          const pixels = width * height;
+          // Calculate bitrate: ~0.1 bits per pixel per frame at target FPS
+          const bitrate = Math.min(50_000_000, Math.max(2_000_000, Math.floor(pixels * targetFps * 0.1)));
+          const mr = new MediaRecorder(stream, { 
+            mimeType: mime, 
+            videoBitsPerSecond: bitrate,
+          });
           recordedChunksRef.current = [];
-          mr.ondataavailable = (e) => { if (e.data && e.data.size > 0) recordedChunksRef.current.push(e.data); };
+          // Request data more frequently for smoother recording
+          let dataInterval: NodeJS.Timeout | null = null;
+          mr.ondataavailable = (e) => { 
+            if (e.data && e.data.size > 0) {
+              recordedChunksRef.current.push(e.data);
+            }
+          };
+          // Request data chunks every 100ms for smoother recording
+          dataInterval = setInterval(() => {
+            if (mr.state === 'recording') {
+              mr.requestData();
+            }
+          }, 100);
           mr.onstop = () => {
+            if (dataInterval) clearInterval(dataInterval);
             const blob = new Blob(recordedChunksRef.current, { type: mime });
             const url = URL.createObjectURL(blob);
             setRecordingUrl(url);
+            setRecordingMimeType(mime);
             setIsRecording(false);
             // restore canvas size
             if (restoreSizeRef.current) setDesiredCanvasSize(restoreSizeRef.current);
             restoreSizeRef.current = null;
           };
-          mr.start();
+          mr.start(100); // Request data every 100ms
           mediaRecorderRef.current = mr;
           setIsRecording(true);
-        }, 150);
+        }, 200); // Slightly longer delay to ensure canvas is ready
       } catch (e) {
         console.warn('Failed to start recording', e);
+        setIsRecording(false);
       }
     };
 
@@ -164,6 +209,22 @@ export function ForceFieldCanvas() {
       engineRef.current.updateParticlesFromStore(particles);
     }
   }, [particles, desiredCanvasSize, canvasSize, settings]);
+
+  // Cache background image when data URL changes
+  useEffect(() => {
+    if (settings.backgroundImage?.imageDataUrl) {
+      const img = new Image();
+      img.onload = () => {
+        backgroundImageRef.current = img;
+      };
+      img.onerror = () => {
+        backgroundImageRef.current = null;
+      };
+      img.src = settings.backgroundImage.imageDataUrl;
+    } else {
+      backgroundImageRef.current = null;
+    }
+  }, [settings.backgroundImage?.imageDataUrl]);
 
   // Keyboard event handlers for hotkey functionality
   const handleKeyDown = useCallback((event: KeyboardEvent) => {
@@ -212,6 +273,21 @@ export function ForceFieldCanvas() {
   const animate = useCallback(() => {
     if (!canvasRef.current || !engineRef.current) return;
 
+    const now = performance.now();
+    const targetFps = isRecording ? (exportSettings.fps || 60) : 60;
+    const frameTime = 1000 / targetFps;
+
+    // Frame rate limiting during recording
+    if (isRecording) {
+      const elapsed = now - lastFrameTimeRef.current;
+      if (elapsed < frameTime) {
+        // Skip this frame to maintain target FPS
+        animationRef.current = requestAnimationFrame(animate);
+        return;
+      }
+      lastFrameTimeRef.current = now;
+    }
+
     const canvas = canvasRef.current;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
@@ -220,17 +296,65 @@ export function ForceFieldCanvas() {
     canvas.width = canvasSize.width;
     canvas.height = canvasSize.height;
 
-    // Clear canvas with background color
+    // Always draw background color first
     ctx.fillStyle = settings.canvasBackgroundColor;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-    // Update and draw particles
+    // Draw background image on top of background color (if present)
+    if (settings.backgroundImage?.imageDataUrl && backgroundImageRef.current) {
+      const img = backgroundImageRef.current;
+      ctx.save();
+      const centerX = canvas.width / 2;
+      const centerY = canvas.height / 2;
+      
+      // Move to center for rotation
+      ctx.translate(centerX + settings.backgroundImage.positionX, 
+                   centerY + settings.backgroundImage.positionY);
+      ctx.rotate((settings.backgroundImage.rotation * Math.PI) / 180);
+      ctx.scale(settings.backgroundImage.scale, settings.backgroundImage.scale);
+      
+      // Calculate draw dimensions
+      const drawWidth = settings.backgroundImage.width ?? img.width;
+      const drawHeight = settings.backgroundImage.height ?? img.height;
+      
+      // Draw from center
+      ctx.drawImage(img, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight);
+      ctx.restore();
+    }
+
+    // Disable adaptive rendering during recording for full quality
+    const wasAdaptiveEnabled = settings.performance?.adaptiveEnabled;
+    if (isRecording && wasAdaptiveEnabled && engineRef.current) {
+      // Temporarily disable adaptive rendering
+      engineRef.current.updateSettings({
+        performance: {
+          ...settings.performance,
+          adaptiveEnabled: false,
+          visibleFraction: 1.0,
+        },
+      });
+    }
+
+    // Update and draw particles with opacity
     engineRef.current.updateParticles();
+    ctx.save();
+    ctx.globalAlpha = settings.particleOpacity;
     engineRef.current.drawParticles(ctx);
+    ctx.restore();
+
+    // Restore adaptive settings after drawing
+    if (isRecording && wasAdaptiveEnabled && engineRef.current) {
+      engineRef.current.updateSettings({
+        performance: {
+          ...settings.performance,
+          adaptiveEnabled: wasAdaptiveEnabled,
+        },
+      });
+    }
 
     // Always continue the animation loop
     animationRef.current = requestAnimationFrame(animate);
-  }, [settings.canvasBackgroundColor, canvasSize]);
+  }, [settings.canvasBackgroundColor, settings.backgroundImage, settings.particleOpacity, settings.performance, canvasSize, isRecording, exportSettings.fps]);
 
   // Start animation and keep it running
   useEffect(() => {
