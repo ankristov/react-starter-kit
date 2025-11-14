@@ -211,6 +211,21 @@ export interface MousePosition {
   active: boolean;
 }
 
+// Recorded particle state for video rendering - OPTIMIZED to only store visual data
+export interface RecordedParticle {
+  x: number;
+  y: number;
+  color: string; // RGB string
+  size: number;
+  shape: 'circle' | 'square' | 'triangle';
+  visible: boolean;
+}
+
+export interface RecordedFrame {
+  timestamp: number; // relative to recording start (ms)
+  particles: RecordedParticle[];
+}
+
 export interface BackgroundImageSettings {
   imageDataUrl: string | null;
   scale: number;

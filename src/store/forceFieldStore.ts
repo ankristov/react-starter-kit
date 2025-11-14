@@ -18,7 +18,7 @@ interface ForceFieldState {
   setRecordingUrl: (url: string | null) => void;
   setRecordingMimeType: (mime: string | null) => void;
   // Recorder control wiring (canvas registers callbacks)
-  setRecorderControl: (ctrl: { start: () => void; stop: () => void } | null) => void;
+  setRecorderControl: (ctrl: { start: () => void; stop: () => void; getRecordedStates?: () => any } | null) => void;
   startRecording: () => void;
   stopRecording: () => void;
   colorAnalysis: ColorInfo[]; // Add color analysis data
@@ -429,12 +429,17 @@ export const useForceFieldStore = create<ForceFieldState>((set, get) => ({
   },
   setCurrentFileHash: (hash: string | null) => {
     try {
+      const currentState = get();
+      const currentBackgroundImage = currentState.settings.backgroundImage; // Preserve current background image
+      
       set({ currentFileHash: hash });
       
       // Load file-specific settings when file hash changes
       if (hash) {
         const fileSpecificSettings = loadSettings(hash);
-        set({ settings: fileSpecificSettings });
+        // Preserve background image from current state (don't override with file-specific settings)
+        const settingsWithPreservedBg = { ...fileSpecificSettings, backgroundImage: currentBackgroundImage };
+        set({ settings: settingsWithPreservedBg });
         // Load file-specific presets
         const names = Object.keys(loadPresets(hash));
         set({ presetNames: names, selectedPreset: names.includes('Default') ? 'Default' : (names[0] ?? null) });
@@ -442,8 +447,10 @@ export const useForceFieldStore = create<ForceFieldState>((set, get) => ({
       } else {
         // Load global settings when no file hash
         const globalSettings = loadSettings();
+        // Preserve background image from current state
+        const settingsWithPreservedBg = { ...globalSettings, backgroundImage: currentBackgroundImage };
         const names = Object.keys(loadPresets());
-        set({ settings: globalSettings, presetNames: names, selectedPreset: names.includes('Default') ? 'Default' : (names[0] ?? null) });
+        set({ settings: settingsWithPreservedBg, presetNames: names, selectedPreset: names.includes('Default') ? 'Default' : (names[0] ?? null) });
         console.log('Loaded global settings');
       }
     } catch (error) {

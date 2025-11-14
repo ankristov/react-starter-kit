@@ -9,9 +9,9 @@ import { ParticleEngine } from '../lib/particleEngine';
 import { ForceTypeControls } from './ForceTypeControls';
 import type { ForcePulseType } from '../types/particle';
 import { ColorFilter } from './ColorFilter';
-import { ChevronDown, ChevronRight, Info, X, Loader2 } from 'lucide-react';
+import { ChevronDown, ChevronRight, Info, X, Loader2, HelpCircle } from 'lucide-react';
 import { detectFormatMismatch } from '../lib/imageUtils';
-import { convertWebmToMp4 } from '../lib/videoConverter';
+import { checkServerHealth, interpolateVideo, downloadBlob } from '../lib/interpolationService';
 
 // Generate a hash for a file
 const generateFileHash = async (file: File): Promise<string> => {
@@ -112,6 +112,16 @@ export function ControlPanel() {
       setParticleCount(particles.length);
       engineRef.current = engine;
     }
+
+    // Check if interpolation server is available
+    checkServerHealth().then(available => {
+      setServerAvailable(available);
+      if (available) {
+        console.log('[ControlPanel] Interpolation server is available');
+      } else {
+        console.warn('[ControlPanel] Interpolation server is not available - start the server with: npm run start-interpolate-server');
+      }
+    });
   }, []); // Only run once on mount
 
   const handleFileUpload = async (file: File) => {
@@ -233,32 +243,39 @@ export function ControlPanel() {
   };
 
   // Force Preset states (must be declared at top-level to satisfy Hooks rules)
-  const [pulseSelected, setPulseSelected] = useState<ForcePulseType>('tornado');
+  // Timing & Easing
+  const [pulseSelected, setPulseSelected] = useState<ForcePulseType>('burst');
   const [pulseDuration, setPulseDuration] = useState<number>(1500);
+  const [pulseHoldTime, setPulseHoldTime] = useState<number>(0);
+  const [easeIn, setEaseIn] = useState<number>(0.2);
+  const [easeOut, setEaseOut] = useState<number>(0.2);
+  const [easeType, setEaseType] = useState<'linear' | 'ease-in' | 'ease-out' | 'ease-in-out' | 'ease-in-cubic' | 'ease-out-cubic' | 'ease-in-out-cubic' | 'ease-in-quad' | 'ease-out-quad' | 'ease-in-out-quad'>('ease-in-out-quad');
+  // Force Parameters
   const [pulseStrength, setPulseStrength] = useState<number>(30);
+  const [pulseIntensity, setPulseIntensity] = useState<number>(1.0);
+  const [pulseRadius, setPulseRadius] = useState<number>(1500);
+  // Direction & Rotation
   const [pulseDirectionDeg, setPulseDirectionDeg] = useState<number>(90);
   const [pulseClockwise, setPulseClockwise] = useState<boolean>(true);
+  // Frequency & Chaos
   const [pulseFrequency, setPulseFrequency] = useState<number>(1.5);
   const [pulseChaos, setPulseChaos] = useState<number>(0.6);
+  // Origin (for centered forces)
   const [pulseOriginX, setPulseOriginX] = useState<number>(0.5);
   const [pulseOriginY, setPulseOriginY] = useState<number>(0.5);
+  // Wave & Spiral specific
+  const [pulseWaveCount, setPulseWaveCount] = useState<number>(3);
+  const [pulseSpiralTurns, setPulseSpiralTurns] = useState<number>(2);
   // Randomize-specific controls
   const [randomizeScatterSpeed, setRandomizeScatterSpeed] = useState<number>(3.0);
   const [randomizeScatterDurationPercent, setRandomizeScatterDurationPercent] = useState<number>(30);
   const [randomizeHoldTime, setRandomizeHoldTime] = useState<number>(500);
   const [randomizeReturnDurationPercent, setRandomizeReturnDurationPercent] = useState<number>(40);
-  // Easing controls
-  const [easeIn, setEaseIn] = useState<number>(0);
-  const [easeOut, setEaseOut] = useState<number>(0);
-  const [easeType, setEaseType] = useState<'linear' | 'ease-in' | 'ease-out' | 'ease-in-out' | 'ease-in-cubic' | 'ease-out-cubic' | 'ease-in-out-cubic' | 'ease-in-quad' | 'ease-out-quad' | 'ease-in-out-quad'>('linear');
-  // Type-specific parameters
-  const [pulseRadius, setPulseRadius] = useState<number>(100);
-  const [pulseIntensity, setPulseIntensity] = useState<number>(1.0);
-  const [pulseWaveCount, setPulseWaveCount] = useState<number>(3);
-  const [pulseSpiralTurns, setPulseSpiralTurns] = useState<number>(2);
   // Video conversion progress
   const [conversionProgress, setConversionProgress] = useState<{ progress: number; message: string } | null>(null);
   const [abortController, setAbortController] = useState<AbortController | null>(null);
+  // Server health check
+  const [serverAvailable, setServerAvailable] = useState<boolean | null>(null);
 
   // Canvas size preset controls
   type CanvasPreset = 'original' | 'instagramReel' | 'youtube' | 'square' | 'custom';
@@ -827,7 +844,8 @@ export function ControlPanel() {
                 const onImpact = () => {
                   const base: any = { 
                     type: pulseSelected, 
-                    durationMs: pulseDuration, 
+                    durationMs: pulseDuration,
+                    holdTimeMs: pulseHoldTime,
                     strength: pulseStrength,
                     easeIn: easeIn,
                     easeOut: easeOut,
@@ -873,7 +891,6 @@ export function ControlPanel() {
                   if (pulseSelected === 'randomize') {
                     base.scatterSpeed = randomizeScatterSpeed;
                     base.scatterDurationPercent = randomizeScatterDurationPercent;
-                    base.holdTimeMs = randomizeHoldTime;
                     base.returnDurationPercent = randomizeReturnDurationPercent;
                   }
                   enqueuePulse(base);
@@ -881,7 +898,8 @@ export function ControlPanel() {
 
                 return (
                   <>
-                    <div className="mb-3">
+                    {/* Preset selector and button */}
+                    <div className="mb-3 space-y-2">
                       <Select value={pulseSelected} onValueChange={(v: any) => setPulseSelected(v)}>
                         <SelectTrigger className="w-full h-8 bg-slate-800 border-slate-700 text-purple-200">
                           <SelectValue placeholder="Choose preset" />
@@ -892,180 +910,209 @@ export function ControlPanel() {
                           ))}
                         </SelectContent>
                       </Select>
+                      <Button onClick={onImpact} className="w-full h-8 bg-purple-600/40 hover:bg-purple-600/60">Impact!</Button>
                     </div>
-                    <Button onClick={onImpact} className="w-full h-8 bg-purple-600/40 hover:bg-purple-600/60">Impact!</Button>
-                    <div className="mt-3 grid grid-cols-2 gap-2">
-                      <div>
-                        <label className="block text-[11px] text-purple-300/80 mb-1">Duration (ms)</label>
-                        <input type="number" value={pulseDuration} min={100} max={60000} onChange={(e)=>setPulseDuration(Number(e.target.value))} className="w-full px-2 py-1.5 bg-slate-800 border border-slate-700 rounded text-purple-200 text-xs" />
+
+                    {/* Timing & Easing Section */}
+                    <div className="bg-slate-800/40 border border-slate-700/40 rounded p-2.5 mb-3 space-y-2">
+                      <div className="text-[10px] font-semibold text-purple-300/70 uppercase">Timing & Easing</div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="block text-[11px] text-purple-300/80 mb-1">Duration (ms)</label>
+                          <input type="number" value={pulseDuration} min={100} max={60000} onChange={(e)=>setPulseDuration(Number(e.target.value))} className="w-full px-2 py-1.5 bg-slate-800 border border-slate-700 rounded text-purple-200 text-xs" />
+                        </div>
+                        <div>
+                          <label className="block text-[11px] text-purple-300/80 mb-1">Hold Time (ms)</label>
+                          <input type="number" value={pulseHoldTime} min={0} max={10000} step={100} onChange={(e)=>setPulseHoldTime(Number(e.target.value))} className="w-full px-2 py-1.5 bg-slate-800 border border-slate-700 rounded text-purple-200 text-xs" />
+                        </div>
                       </div>
-                      <div>
-                        <label className="block text-[11px] text-purple-300/80 mb-1">Strength</label>
-                        <input type="number" value={pulseStrength} min={1} max={200} step={1} onChange={(e)=>setPulseStrength(Number(e.target.value))} className="w-full px-2 py-1.5 bg-slate-800 border border-slate-700 rounded text-purple-200 text-xs" />
-                      </div>
-                      {(['gravity','wind','crosswind','gravityFlip','waveLeft','waveUp'].includes(pulseSelected)) && (
-                        <div className="col-span-2">
-                          <label className="block text-[11px] text-purple-300/80 mb-1">Direction (deg)</label>
-                          <input type="number" value={pulseDirectionDeg} min={-360} max={360} step={1} onChange={(e)=>setPulseDirectionDeg(Number(e.target.value))} className="w-full px-2 py-1.5 bg-slate-800 border border-slate-700 rounded text-purple-200 text-xs" />
-                        </div>
-                      )}
-                      {(['tornado','ringSpin'].includes(pulseSelected)) && (
-                        <div className="flex items-center gap-2">
-                          <input id="pulseClockwise" type="checkbox" checked={pulseClockwise} onChange={(e)=>setPulseClockwise(e.target.checked)} />
-                          <label htmlFor="pulseClockwise" className="text-xs text-purple-200">Clockwise</label>
-                        </div>
-                      )}
-                      {(['noise','ripple','waveLeft','waveUp','crosswind'].includes(pulseSelected)) && (
-                        <div>
-                          <label className="block text-[11px] text-purple-300/80 mb-1">Frequency</label>
-                          <input type="number" step={0.1} min={0.1} max={10} value={pulseFrequency} onChange={(e)=>setPulseFrequency(Number(e.target.value))} className="w-full px-2 py-1.5 bg-slate-800 border border-slate-700 rounded text-purple-200 text-xs" />
-                        </div>
-                      )}
-                      {(['noise','randomJitter'].includes(pulseSelected)) && (
-                        <div>
-                          <label className="block text-[11px] text-purple-300/80 mb-1">Chaos</label>
-                          <input type="number" step={0.05} min={0} max={2} value={pulseChaos} onChange={(e)=>setPulseChaos(Number(e.target.value))} className="w-full px-2 py-1.5 bg-slate-800 border border-slate-700 rounded text-purple-200 text-xs" />
-                        </div>
-                      )}
-                      {(['shockwave','ripple','burst','implosion','supernova','ringBurst','edgeBurst','multiBurst'].includes(pulseSelected)) && (
-                        <div className="col-span-2 grid grid-cols-2 gap-2">
-                          <div>
-                            <label className="block text-[11px] text-purple-300/80 mb-1">Origin X (0..1)</label>
-                            <input type="number" step={0.01} min={0} max={1} value={pulseOriginX} onChange={(e)=>setPulseOriginX(Number(e.target.value))} className="w-full px-2 py-1.5 bg-slate-800 border border-slate-700 rounded text-purple-200 text-xs" />
-                          </div>
-                          <div>
-                            <label className="block text-[11px] text-purple-300/80 mb-1">Origin Y (0..1)</label>
-                            <input type="number" step={0.01} min={0} max={1} value={pulseOriginY} onChange={(e)=>setPulseOriginY(Number(e.target.value))} className="w-full px-2 py-1.5 bg-slate-800 border border-slate-700 rounded text-purple-200 text-xs" />
-                          </div>
-                        </div>
-                      )}
-                      {/* Radius-based types */}
-                      {(['burst','implosion','shockwave','supernova','ringBurst','edgeBurst'].includes(pulseSelected)) && (
-                        <div className="col-span-2 grid grid-cols-2 gap-2">
-                          <div>
-                            <label className="block text-[11px] text-purple-300/80 mb-1">Radius</label>
-                            <input type="number" step={10} min={10} max={1000} value={pulseRadius} onChange={(e)=>setPulseRadius(Number(e.target.value))} className="w-full px-2 py-1.5 bg-slate-800 border border-slate-700 rounded text-purple-200 text-xs" />
-                          </div>
-                          {(['supernova','burst','implosion'].includes(pulseSelected)) && (
-                            <div>
-                              <label className="block text-[11px] text-purple-300/80 mb-1">Intensity</label>
-                              <input type="number" step={0.1} min={0.1} max={5} value={pulseIntensity} onChange={(e)=>setPulseIntensity(Number(e.target.value))} className="w-full px-2 py-1.5 bg-slate-800 border border-slate-700 rounded text-purple-200 text-xs" />
-                            </div>
-                          )}
-                        </div>
-                      )}
-                      {/* Wave count for ripple/wave types */}
-                      {(['ripple','waveLeft','waveUp'].includes(pulseSelected)) && (
-                        <div>
-                          <label className="block text-[11px] text-purple-300/80 mb-1">Wave Count</label>
-                          <input type="number" step={1} min={1} max={20} value={pulseWaveCount} onChange={(e)=>setPulseWaveCount(Number(e.target.value))} className="w-full px-2 py-1.5 bg-slate-800 border border-slate-700 rounded text-purple-200 text-xs" />
-                        </div>
-                      )}
-                      {/* Spiral types */}
-                      {(['spiralIn','spiralOut'].includes(pulseSelected)) && (
-                        <div>
-                          <label className="block text-[11px] text-purple-300/80 mb-1">Spiral Turns</label>
-                          <input type="number" step={0.5} min={0.5} max={10} value={pulseSpiralTurns} onChange={(e)=>setPulseSpiralTurns(Number(e.target.value))} className="w-full px-2 py-1.5 bg-slate-800 border border-slate-700 rounded text-purple-200 text-xs" />
-                        </div>
-                      )}
-                      {/* Quake type */}
-                      {(pulseSelected === 'quake') && (
-                        <div>
-                          <label className="block text-[11px] text-purple-300/80 mb-1">Intensity</label>
-                          <input type="number" step={0.1} min={0.1} max={5} value={pulseIntensity} onChange={(e)=>setPulseIntensity(Number(e.target.value))} className="w-full px-2 py-1.5 bg-slate-800 border border-slate-700 rounded text-purple-200 text-xs" />
-                        </div>
-                      )}
-                      {/* Randomize-specific controls */}
-                      {(pulseSelected === 'randomize') && (
-                        <div className="col-span-2 space-y-2">
-                          <div className="grid grid-cols-2 gap-2">
-                            <div>
-                              <label className="block text-[11px] text-purple-300/80 mb-1">Scatter Speed</label>
-                              <input type="number" step={0.1} min={0.5} max={10} value={randomizeScatterSpeed} onChange={(e)=>setRandomizeScatterSpeed(Number(e.target.value))} className="w-full px-2 py-1.5 bg-slate-800 border border-slate-700 rounded text-purple-200 text-xs" />
-                            </div>
-                            <div>
-                              <label className="block text-[11px] text-purple-300/80 mb-1">Scatter Duration (%)</label>
-                              <input type="number" step={5} min={10} max={80} value={randomizeScatterDurationPercent} onChange={(e)=>setRandomizeScatterDurationPercent(Number(e.target.value))} className="w-full px-2 py-1.5 bg-slate-800 border border-slate-700 rounded text-purple-200 text-xs" />
-                            </div>
-                            <div>
-                              <label className="block text-[11px] text-purple-300/80 mb-1">Hold Time (ms)</label>
-                              <input type="number" step={50} min={0} max={5000} value={randomizeHoldTime} onChange={(e)=>setRandomizeHoldTime(Number(e.target.value))} className="w-full px-2 py-1.5 bg-slate-800 border border-slate-700 rounded text-purple-200 text-xs" />
-                            </div>
-                            <div>
-                              <label className="block text-[11px] text-purple-300/80 mb-1">Return Duration (%)</label>
-                              <input type="number" step={5} min={10} max={80} value={randomizeReturnDurationPercent} onChange={(e)=>setRandomizeReturnDurationPercent(Number(e.target.value))} className="w-full px-2 py-1.5 bg-slate-800 border border-slate-700 rounded text-purple-200 text-xs" />
-                            </div>
-                          </div>
-                          {/* Duration breakdown display */}
-                          <div className="bg-slate-800/50 border border-slate-700/50 rounded p-2 text-[10px] text-purple-300/70">
-                            <div className="font-semibold mb-1 text-purple-200/80">Animation Timeline:</div>
-                            <div className="space-y-0.5">
-                              <div>• Scatter: {randomizeScatterDurationPercent}% ({Math.round(pulseDuration * randomizeScatterDurationPercent / 100)}ms) - Particles move to random positions</div>
-                              <div>• Hold: {randomizeHoldTime}ms - Particles stay at random positions</div>
-                              <div>• Return: {randomizeReturnDurationPercent}% ({Math.round(pulseDuration * randomizeReturnDurationPercent / 100)}ms) - Particles return to original positions</div>
-                              {(() => {
-                                const scatterMs = Math.round(pulseDuration * randomizeScatterDurationPercent / 100);
-                                const returnMs = Math.round(pulseDuration * randomizeReturnDurationPercent / 100);
-                                const totalUsed = scatterMs + randomizeHoldTime + returnMs;
-                                const remaining = pulseDuration - totalUsed;
-                                if (remaining > 0) {
-                                  return <div className="text-purple-400/60 italic">• Remaining: {remaining}ms ({Math.round(remaining / pulseDuration * 100)}%) - Transition time between phases</div>;
-                                } else if (remaining < 0) {
-                                  return <div className="text-orange-400/80 italic">⚠️ Phases exceed total duration by {Math.abs(remaining)}ms</div>;
-                                }
-                                return null;
-                              })()}
-                            </div>
-                          </div>
-                          <div className="text-[10px] text-purple-300/60 italic">
-                            Particles will smoothly return using restoration force
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                    
-                    {/* Easing Controls - below all type-specific controls */}
-                    <div className="mt-3 space-y-2">
                       <div>
                         <label className="block text-[11px] text-purple-300/80 mb-1">
                           Ease Type
                           <span className="ml-1 text-purple-400/60" title="Type of easing curve to apply">ℹ️</span>
                         </label>
                         <Select value={easeType} onValueChange={(v: any) => setEaseType(v)}>
-                          <SelectTrigger className="w-full h-8 bg-slate-800 border-slate-700 text-purple-200 text-xs">
+                          <SelectTrigger className="w-full h-7 bg-slate-800 border-slate-700 text-purple-200 text-xs">
                             <SelectValue />
                           </SelectTrigger>
                           <SelectContent>
                             <SelectItem value="linear">Linear (no easing)</SelectItem>
-                            <SelectItem value="ease-in">Ease In (slow start)</SelectItem>
-                            <SelectItem value="ease-out">Ease Out (slow end)</SelectItem>
-                            <SelectItem value="ease-in-out">Ease In-Out (slow start & end)</SelectItem>
-                            <SelectItem value="ease-in-quad">Ease In Quad (stronger slow start)</SelectItem>
-                            <SelectItem value="ease-out-quad">Ease Out Quad (stronger slow end)</SelectItem>
-                            <SelectItem value="ease-in-out-quad">Ease In-Out Quad (stronger both)</SelectItem>
-                            <SelectItem value="ease-in-cubic">Ease In Cubic (very strong slow start)</SelectItem>
-                            <SelectItem value="ease-out-cubic">Ease Out Cubic (very strong slow end)</SelectItem>
-                            <SelectItem value="ease-in-out-cubic">Ease In-Out Cubic (very strong both)</SelectItem>
+                            <SelectItem value="ease-in">Ease In</SelectItem>
+                            <SelectItem value="ease-out">Ease Out</SelectItem>
+                            <SelectItem value="ease-in-out">Ease In-Out</SelectItem>
+                            <SelectItem value="ease-in-quad">Ease In Quad</SelectItem>
+                            <SelectItem value="ease-out-quad">Ease Out Quad</SelectItem>
+                            <SelectItem value="ease-in-out-quad">Ease In-Out Quad</SelectItem>
+                            <SelectItem value="ease-in-cubic">Ease In Cubic</SelectItem>
+                            <SelectItem value="ease-out-cubic">Ease Out Cubic</SelectItem>
+                            <SelectItem value="ease-in-out-cubic">Ease In-Out Cubic</SelectItem>
                           </SelectContent>
                         </Select>
                       </div>
                       <div className="grid grid-cols-2 gap-2">
                         <div>
                           <label className="block text-[11px] text-purple-300/80 mb-1">
-                            Ease In Amount (0-1)
-                            <span className="ml-1 text-purple-400/60" title="0 = no easing, 1 = maximum easing. Controls how much the selected ease type affects the start of the animation.">ℹ️</span>
+                            Ease In (0-1)
+                            <span className="ml-1 text-purple-400/60" title="How much to ease at start">ℹ️</span>
                           </label>
-                          <input type="number" step={0.1} min={0} max={1} value={easeIn} onChange={(e)=>setEaseIn(Number(e.target.value))} className="w-full px-2 py-1.5 bg-slate-800 border border-slate-700 rounded text-purple-200 text-xs" />
+                          <input type="number" step={0.05} min={0} max={1} value={easeIn} onChange={(e)=>setEaseIn(Number(e.target.value))} className="w-full px-2 py-1.5 bg-slate-800 border border-slate-700 rounded text-purple-200 text-xs" />
                         </div>
                         <div>
                           <label className="block text-[11px] text-purple-300/80 mb-1">
-                            Ease Out Amount (0-1)
-                            <span className="ml-1 text-purple-400/60" title="0 = no easing, 1 = maximum easing. Controls how much the selected ease type affects the end of the animation.">ℹ️</span>
+                            Ease Out (0-1)
+                            <span className="ml-1 text-purple-400/60" title="How much to ease at end">ℹ️</span>
                           </label>
-                          <input type="number" step={0.1} min={0} max={1} value={easeOut} onChange={(e)=>setEaseOut(Number(e.target.value))} className="w-full px-2 py-1.5 bg-slate-800 border border-slate-700 rounded text-purple-200 text-xs" />
+                          <input type="number" step={0.05} min={0} max={1} value={easeOut} onChange={(e)=>setEaseOut(Number(e.target.value))} className="w-full px-2 py-1.5 bg-slate-800 border border-slate-700 rounded text-purple-200 text-xs" />
                         </div>
                       </div>
                     </div>
+
+                    {/* Force Parameters Section */}
+                    <div className="bg-slate-800/40 border border-slate-700/40 rounded p-2.5 mb-3 space-y-2">
+                      <div className="text-[10px] font-semibold text-purple-300/70 uppercase">Force Parameters</div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="block text-[11px] text-purple-300/80 mb-1">Strength</label>
+                          <input type="number" value={pulseStrength} min={1} max={200} step={1} onChange={(e)=>setPulseStrength(Number(e.target.value))} className="w-full px-2 py-1.5 bg-slate-800 border border-slate-700 rounded text-purple-200 text-xs" />
+                        </div>
+                        {(['burst','implosion','shockwave','supernova','ringBurst','edgeBurst','quake'].includes(pulseSelected)) && (
+                          <div>
+                            <label className="block text-[11px] text-purple-300/80 mb-1">Intensity</label>
+                            <input type="number" step={0.1} min={0.1} max={5} value={pulseIntensity} onChange={(e)=>setPulseIntensity(Number(e.target.value))} className="w-full px-2 py-1.5 bg-slate-800 border border-slate-700 rounded text-purple-200 text-xs" />
+                          </div>
+                        )}
+                        {(['burst','implosion','shockwave','supernova','ringBurst','edgeBurst'].includes(pulseSelected)) && (
+                          <div>
+                            <label className="block text-[11px] text-purple-300/80 mb-1">Radius (px)</label>
+                            <input type="number" step={50} min={10} max={3000} value={pulseRadius} onChange={(e)=>setPulseRadius(Number(e.target.value))} className="w-full px-2 py-1.5 bg-slate-800 border border-slate-700 rounded text-purple-200 text-xs" />
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Direction & Rotation Section */}
+                    <div className="space-y-2">
+                      {(['gravity','wind','crosswind','gravityFlip','waveLeft','waveUp'].includes(pulseSelected)) && (
+                        <div className="bg-slate-800/40 border border-slate-700/40 rounded p-2.5 space-y-2">
+                          <div className="text-[10px] font-semibold text-purple-300/70 uppercase">Direction</div>
+                          <div>
+                            <label className="block text-[11px] text-purple-300/80 mb-1">Direction (deg)</label>
+                            <input type="number" value={pulseDirectionDeg} min={-360} max={360} step={1} onChange={(e)=>setPulseDirectionDeg(Number(e.target.value))} className="w-full px-2 py-1.5 bg-slate-800 border border-slate-700 rounded text-purple-200 text-xs" />
+                          </div>
+                        </div>
+                      )}
+                      {(['tornado','ringSpin'].includes(pulseSelected)) && (
+                        <div className="bg-slate-800/40 border border-slate-700/40 rounded p-2.5">
+                          <div className="text-[10px] font-semibold text-purple-300/70 uppercase mb-2">Rotation</div>
+                          <div className="flex items-center gap-2">
+                            <input id="pulseClockwise" type="checkbox" checked={pulseClockwise} onChange={(e)=>setPulseClockwise(e.target.checked)} />
+                            <label htmlFor="pulseClockwise" className="text-xs text-purple-200">Clockwise</label>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Frequency & Chaos Section */}
+                    <div className="space-y-2">
+                      {(['noise','ripple','waveLeft','waveUp','crosswind'].includes(pulseSelected)) && (
+                        <div className="bg-slate-800/40 border border-slate-700/40 rounded p-2.5 space-y-2">
+                          <div className="text-[10px] font-semibold text-purple-300/70 uppercase">Wave Parameters</div>
+                          <div>
+                            <label className="block text-[11px] text-purple-300/80 mb-1">Frequency</label>
+                            <input type="number" step={0.1} min={0.1} max={10} value={pulseFrequency} onChange={(e)=>setPulseFrequency(Number(e.target.value))} className="w-full px-2 py-1.5 bg-slate-800 border border-slate-700 rounded text-purple-200 text-xs" />
+                          </div>
+                          {(['ripple','waveLeft','waveUp'].includes(pulseSelected)) && (
+                            <div>
+                              <label className="block text-[11px] text-purple-300/80 mb-1">Wave Count</label>
+                              <input type="number" step={1} min={1} max={20} value={pulseWaveCount} onChange={(e)=>setPulseWaveCount(Number(e.target.value))} className="w-full px-2 py-1.5 bg-slate-800 border border-slate-700 rounded text-purple-200 text-xs" />
+                            </div>
+                          )}
+                        </div>
+                      )}
+                      {(['noise','randomJitter'].includes(pulseSelected)) && (
+                        <div className="bg-slate-800/40 border border-slate-700/40 rounded p-2.5 space-y-2">
+                          <div className="text-[10px] font-semibold text-purple-300/70 uppercase">Chaos</div>
+                          <div>
+                            <label className="block text-[11px] text-purple-300/80 mb-1">Chaos</label>
+                            <input type="number" step={0.05} min={0} max={2} value={pulseChaos} onChange={(e)=>setPulseChaos(Number(e.target.value))} className="w-full px-2 py-1.5 bg-slate-800 border border-slate-700 rounded text-purple-200 text-xs" />
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Origin & Geometry Section */}
+                    <div className="space-y-2">
+                      {(['shockwave','ripple','burst','implosion','supernova','ringBurst','edgeBurst','multiBurst'].includes(pulseSelected)) && (
+                        <div className="bg-slate-800/40 border border-slate-700/40 rounded p-2.5 space-y-2">
+                          <div className="text-[10px] font-semibold text-purple-300/70 uppercase">Origin</div>
+                          <div className="grid grid-cols-2 gap-2">
+                            <div>
+                              <label className="block text-[11px] text-purple-300/80 mb-1">Origin X (0..1)</label>
+                              <input type="number" step={0.05} min={0} max={1} value={pulseOriginX} onChange={(e)=>setPulseOriginX(Number(e.target.value))} className="w-full px-2 py-1.5 bg-slate-800 border border-slate-700 rounded text-purple-200 text-xs" />
+                            </div>
+                            <div>
+                              <label className="block text-[11px] text-purple-300/80 mb-1">Origin Y (0..1)</label>
+                              <input type="number" step={0.05} min={0} max={1} value={pulseOriginY} onChange={(e)=>setPulseOriginY(Number(e.target.value))} className="w-full px-2 py-1.5 bg-slate-800 border border-slate-700 rounded text-purple-200 text-xs" />
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                      {(['spiralIn','spiralOut'].includes(pulseSelected)) && (
+                        <div className="bg-slate-800/40 border border-slate-700/40 rounded p-2.5 space-y-2">
+                          <div className="text-[10px] font-semibold text-purple-300/70 uppercase">Spiral</div>
+                          <div>
+                            <label className="block text-[11px] text-purple-300/80 mb-1">Spiral Turns</label>
+                            <input type="number" step={0.5} min={0.5} max={10} value={pulseSpiralTurns} onChange={(e)=>setPulseSpiralTurns(Number(e.target.value))} className="w-full px-2 py-1.5 bg-slate-800 border border-slate-700 rounded text-purple-200 text-xs" />
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Randomize-specific controls */}
+                    {(pulseSelected === 'randomize') && (
+                      <div className="bg-slate-800/40 border border-slate-700/40 rounded p-2.5 space-y-2">
+                        <div className="text-[10px] font-semibold text-purple-300/70 uppercase mb-2">Randomize Animation</div>
+                        <div className="grid grid-cols-2 gap-2">
+                          <div>
+                            <label className="block text-[11px] text-purple-300/80 mb-1">Scatter Speed</label>
+                            <input type="number" step={0.1} min={0.5} max={10} value={randomizeScatterSpeed} onChange={(e)=>setRandomizeScatterSpeed(Number(e.target.value))} className="w-full px-2 py-1.5 bg-slate-800 border border-slate-700 rounded text-purple-200 text-xs" />
+                          </div>
+                          <div>
+                            <label className="block text-[11px] text-purple-300/80 mb-1">Scatter Duration (%)</label>
+                            <input type="number" step={5} min={10} max={80} value={randomizeScatterDurationPercent} onChange={(e)=>setRandomizeScatterDurationPercent(Number(e.target.value))} className="w-full px-2 py-1.5 bg-slate-800 border border-slate-700 rounded text-purple-200 text-xs" />
+                          </div>
+                          <div>
+                            <label className="block text-[11px] text-purple-300/80 mb-1">Hold Time (ms)</label>
+                            <input type="number" step={50} min={0} max={5000} value={randomizeHoldTime} onChange={(e)=>setRandomizeHoldTime(Number(e.target.value))} className="w-full px-2 py-1.5 bg-slate-800 border border-slate-700 rounded text-purple-200 text-xs" />
+                          </div>
+                          <div>
+                            <label className="block text-[11px] text-purple-300/80 mb-1">Return Duration (%)</label>
+                            <input type="number" step={5} min={10} max={80} value={randomizeReturnDurationPercent} onChange={(e)=>setRandomizeReturnDurationPercent(Number(e.target.value))} className="w-full px-2 py-1.5 bg-slate-800 border border-slate-700 rounded text-purple-200 text-xs" />
+                          </div>
+                        </div>
+                        {/* Duration breakdown display */}
+                        <div className="bg-slate-800/50 border border-slate-700/50 rounded p-2 text-[10px] text-purple-300/70">
+                          <div className="font-semibold mb-1 text-purple-200/80">Animation Timeline:</div>
+                          <div className="space-y-0.5">
+                            <div>• Scatter: {randomizeScatterDurationPercent}% ({Math.round(pulseDuration * randomizeScatterDurationPercent / 100)}ms)</div>
+                            <div>• Hold: {randomizeHoldTime}ms</div>
+                            <div>• Return: {randomizeReturnDurationPercent}% ({Math.round(pulseDuration * randomizeReturnDurationPercent / 100)}ms)</div>
+                            {(() => {
+                              const scatterMs = Math.round(pulseDuration * randomizeScatterDurationPercent / 100);
+                              const returnMs = Math.round(pulseDuration * randomizeReturnDurationPercent / 100);
+                              const totalUsed = scatterMs + randomizeHoldTime + returnMs;
+                              const remaining = pulseDuration - totalUsed;
+                              if (remaining > 0) {
+                                return <div className="text-purple-400/60 italic">• Transition: {remaining}ms</div>;
+                              } else if (remaining < 0) {
+                                return <div className="text-orange-400/80 italic">⚠️ Exceeds by {Math.abs(remaining)}ms</div>;
+                              }
+                              return null;
+                            })()}
+                          </div>
+                        </div>
+                      </div>
+                    )}
                   </>
                 );
               })()}
@@ -1123,8 +1170,6 @@ export function ControlPanel() {
                   <div className="flex items-center gap-2">
                     <label className="text-xs text-purple-300/80">FPS</label>
                     <input type="number" value={exportSettings.fps} min={1} max={120} onChange={(e)=>setExportSettings({ fps: Number(e.target.value) })} className="w-20 h-8 px-2 bg-slate-800 border border-slate-700 rounded text-purple-200 text-xs" />
-                    <label className="ml-3 text-xs text-purple-300/80">Duration (s)</label>
-                    <input type="number" value={exportSettings.durationSec} min={1} max={120} onChange={(e)=>setExportSettings({ durationSec: Number(e.target.value) })} className="w-20 h-8 px-2 bg-slate-800 border border-slate-700 rounded text-purple-200 text-xs" />
                   </div>
                 </div>
                 <div className="mt-3 space-y-2">
@@ -1193,131 +1238,65 @@ export function ControlPanel() {
                           className="bg-purple-600/30 hover:bg-purple-600/45 text-purple-100 border border-purple-400/20 disabled:opacity-50 h-8"
                           disabled={conversionProgress !== null}
                           onClick={async () => {
+                            // Check server availability when button is clicked
+                            const serverReady = await checkServerHealth();
+                            setServerAvailable(serverReady);
+                            
+                            if (!serverReady) {
+                              alert('Interpolation server is not available.\n\nTo start the server:\n\n1. Open a terminal\n2. Navigate to the project directory\n3. Run: npm run start-interpolate-server\n\nMake sure FFmpeg is installed on your system.');
+                              return;
+                            }
+                            
+                            if (!recordingUrl) {
+                              alert('No recording available. Record an animation first.');
+                              return;
+                            }
+
                             try {
-                              // Create abort controller for cancellation
-                              const controller = new AbortController();
-                              setAbortController(controller);
-                              
-                              setConversionProgress({ progress: 0, message: 'Preparing conversion...' });
-                              
-                              // Fetch the blob from the URL
-                              setConversionProgress({ progress: 5, message: 'Fetching video...' });
-                              const response = await fetch(recordingUrl, { signal: controller.signal });
-                              if (!response.ok) {
-                                throw new Error(`Failed to fetch recording: ${response.statusText}`);
-                              }
-                              const blob = await response.blob();
-                              
-                              // Check if aborted
-                              if (controller.signal.aborted) {
-                                setConversionProgress(null);
-                                setAbortController(null);
-                                return;
-                              }
-                              
-                              // Only convert if it's WebM
-                              if (!recordingMimeType?.includes('webm')) {
-                                setConversionProgress(null);
-                                setAbortController(null);
-                                alert('Video is already in MP4 format. Use "Download WebM" to download it.');
-                                return;
-                              }
-                              
-                              // Generate filename with readable timestamp
-                              const now = new Date();
-                              const dateStr = now.toLocaleDateString('en-US', { year: 'numeric', month: '2-digit', day: '2-digit' }).replace(/\//g, '-');
-                              const timeStr = now.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' }).replace(/:/g, '-');
-                              const filename = `forcefield_${dateStr}_${timeStr}.mp4`;
-                              
-                              // Convert WebM to MP4 (with abort check)
-                              setConversionProgress({ progress: 10, message: 'Converting to MP4...' });
-                              const finalBlob = await convertWebmToMp4(blob, (progress, message) => {
-                                if (controller.signal.aborted) {
-                                  throw new Error('Conversion aborted');
+                              // Convert data URL to blob
+                              console.log('[ControlPanel] Starting smooth video process...');
+                              const response = await fetch(recordingUrl);
+                              const videoBlob = await response.blob();
+                              console.log('[ControlPanel] Video blob ready:', { size: videoBlob.size, type: videoBlob.type });
+
+                              // Perform interpolation
+                              setConversionProgress(0);
+                              console.log('[ControlPanel] Calling interpolateVideo...');
+                              const smoothedBlob = await interpolateVideo(videoBlob, {
+                                onProgress: (progress, message) => {
+                                  console.log('[ControlPanel] Progress update:', { progress, message });
+                                  // Progress is already 0-100, don't multiply by 100 again
+                                  setConversionProgress(Math.round(progress));
                                 }
-                                setConversionProgress({ progress, message });
                               });
-                              
-                              // Check if aborted before finalizing
-                              if (controller.signal.aborted) {
-                                setConversionProgress(null);
-                                setAbortController(null);
-                                return;
-                              }
-                              
-                              // Create download link
-                              setConversionProgress({ progress: 95, message: 'Preparing download...' });
-                              const url = URL.createObjectURL(finalBlob);
-                              const link = document.createElement('a');
-                              link.href = url;
-                              link.download = filename;
-                              link.style.display = 'none';
-                              document.body.appendChild(link);
-                              link.click();
-                              // Clean up after a short delay
-                              setTimeout(() => {
-                                document.body.removeChild(link);
-                                URL.revokeObjectURL(url);
-                                setConversionProgress(null);
-                                setAbortController(null);
-                              }, 100);
-                            } catch (error) {
-                              if (error instanceof Error && error.name === 'AbortError') {
-                                console.log('Conversion aborted by user');
-                                setConversionProgress(null);
-                                setAbortController(null);
-                                return;
-                              }
-                              console.error('Failed to convert video:', error);
+
+                              console.log('[ControlPanel] Interpolation complete, downloading...', { size: smoothedBlob.size });
+                              // Download the smoothed video
+                              downloadBlob(smoothedBlob, `forcefield-smooth-${Date.now()}.webm`);
                               setConversionProgress(null);
-                              setAbortController(null);
-                              alert(`Failed to convert video: ${error instanceof Error ? error.message : 'Unknown error'}\n\nYou can still download the WebM file using the "Download WebM" button.`);
+                              
+                              console.log('[ControlPanel] Video smoothing complete');
+                            } catch (error) {
+                              setConversionProgress(null);
+                              const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+                              console.error('[ControlPanel] Smoothing error:', error);
+                              alert(`Failed to smooth video: ${errorMsg}`);
                             }
                           }}
                         >
-                          {conversionProgress ? (
+                          {conversionProgress !== null ? (
                             <>
-                              <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                              Converting...
+                              <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+                              {conversionProgress}%
                             </>
                           ) : (
-                            'Convert to MP4'
+                            <>
+                              <HelpCircle className="w-3 h-3 mr-1" />
+                              Smooth Video
+                            </>
                           )}
                         </Button>
                       </div>
-                      
-                      {/* Abort Button - shown only during conversion */}
-                      {conversionProgress && (
-                        <Button
-                          size="sm"
-                          className="w-full bg-orange-600/30 hover:bg-orange-600/45 text-orange-100 border border-orange-400/20 h-8"
-                          onClick={() => {
-                            if (abortController) {
-                              abortController.abort();
-                              setConversionProgress(null);
-                              setAbortController(null);
-                            }
-                          }}
-                        >
-                          Abort Conversion
-                        </Button>
-                      )}
-                      
-                      {/* Progress Bar */}
-                      {conversionProgress && (
-                        <div className="w-full flex flex-col gap-1.5">
-                          <div className="flex items-center justify-between text-xs text-purple-300/80">
-                            <span className="truncate">{conversionProgress.message}</span>
-                            <span className="text-purple-400/60 ml-2 flex-shrink-0">{Math.round(conversionProgress.progress)}%</span>
-                          </div>
-                          <div className="w-full bg-slate-800 rounded-full h-2 overflow-hidden">
-                            <div 
-                              className="h-full bg-purple-500 transition-all duration-300"
-                              style={{ width: `${conversionProgress.progress}%` }}
-                            />
-                          </div>
-                        </div>
-                      )}
                     </div>
                   )}
                 </div>

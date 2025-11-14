@@ -3,6 +3,7 @@ import { useForceFieldStore } from '../store/forceFieldStore';
 import { ParticleEngine } from '../lib/particleEngine';
 import { createDefaultImage } from '../lib/imageUtils';
 import { useFps } from '../hooks/useFps';
+import { eventRecorder } from '../lib/eventRecorder';
 
 export function ForceFieldCanvas() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -12,6 +13,9 @@ export function ForceFieldCanvas() {
   const recordedChunksRef = useRef<Blob[]>([]);
   const restoreSizeRef = useRef<{ width: number; height: number } | null>(null);
   const backgroundImageRef = useRef<HTMLImageElement | null>(null);
+  const recordedParticleStatesRef = useRef<Array<{ timestamp: number; particles: Array<{ x: number; y: number; originalX: number; originalY: number; vx: number; vy: number; color: string; size: number; shape: 'circle' | 'square' | 'triangle'; visible: boolean }> }>> | null>(null);
+  // Use a ref for the closure variable to persist across effect re-runs
+  const recordedStatesClosureRef = useRef<any>(null);
   const [canvasSize, setCanvasSize] = useState({ width: 800, height: 600 });
   const [isForceDisabled, setIsForceDisabled] = useState(false);
   const fps = useFps(500);
@@ -129,6 +133,34 @@ export function ForceFieldCanvas() {
         recordingFrameTimeRef.current = 1000 / (exportSettings.fps || 60);
         // Ensure a small delay so canvas has resized before capture
         setTimeout(() => {
+          // START EVENT RECORDING
+          const w = exportSettings.width || canvasSize.width;
+          const h = exportSettings.height || canvasSize.height;
+          
+          // Capture current canvas as image for replay
+          let initialImage: { imageData: string; width: number; height: number } | undefined;
+          if (canvasRef.current) {
+            try {
+              const imageDataUrl = canvasRef.current.toDataURL('image/png');
+              initialImage = {
+                imageData: imageDataUrl,
+                width: w,
+                height: h,
+              };
+              console.log('[ForceFieldCanvas] Captured initial image for recording');
+            } catch (e) {
+              console.warn('[ForceFieldCanvas] Failed to capture initial image:', e);
+            }
+          }
+          
+          eventRecorder.startRecording(
+            settings,
+            w,
+            h,
+            initialImage
+          );
+          console.log('[ForceFieldCanvas] Event recording started');
+          
           const targetFps = exportSettings.fps || 60;
           const stream = canvasRef.current!.captureStream(targetFps);
           const mime = pickMime();
@@ -157,34 +189,127 @@ export function ForceFieldCanvas() {
             }
           }, 100);
           mr.onstop = () => {
-            if (dataInterval) clearInterval(dataInterval);
-            const blob = new Blob(recordedChunksRef.current, { type: mime });
-            const url = URL.createObjectURL(blob);
-            setRecordingUrl(url);
-            setRecordingMimeType(mime);
-            setIsRecording(false);
-            // restore canvas size
-            if (restoreSizeRef.current) setDesiredCanvasSize(restoreSizeRef.current);
-            restoreSizeRef.current = null;
+            console.log('[ForceFieldCanvas] MediaRecorder onstop called');
+            try {
+              if (dataInterval) {
+                clearInterval(dataInterval);
+                console.log('[ForceFieldCanvas] Cleared data interval');
+              }
+              
+              // STOP EVENT RECORDING
+              const recording = eventRecorder.stopRecording();
+              console.log('[ForceFieldCanvas] Event recording stopped:', recording?.events.length || 0, 'events');
+              
+              const blob = new Blob(recordedChunksRef.current, { type: mime });
+              console.log('[ForceFieldCanvas] Created blob, size:', blob.size, 'bytes, type:', mime);
+              const url = URL.createObjectURL(blob);
+              setRecordingUrl(url);
+              setRecordingMimeType(mime);
+              setIsRecording(false);
+              console.log('[ForceFieldCanvas] Set recording URL and stopped recording flag');
+              
+              // Stop particle state recording and store the recorded states (in onstop to ensure it happens after recording)
+              if (engineRef.current) {
+                console.log('[ForceFieldCanvas] Stopping state recording...');
+                engineRef.current.stopStateRecording();
+                const states = engineRef.current.getRecordedStates();
+                console.log('[ForceFieldCanvas] Retrieved states from engine:', states?.length || 0, 'frames');
+                
+                if (!states || states.length === 0) {
+                  console.error('[ForceFieldCanvas] ERROR: No states retrieved from engine!');
+                } else {
+                  console.log('[ForceFieldCanvas] First frame sample:', {
+                    timestamp: states[0]?.timestamp,
+                    particleCount: states[0]?.particles?.length || 0,
+                  });
+                }
+                
+                // Store in closure ref (this is the primary storage)
+                try {
+                  recordedStatesClosureRef.current = states;
+                  console.log('[ForceFieldCanvas] Stored in closure ref, current value:', recordedStatesClosureRef.current?.length || 0, 'frames');
+                } catch (error) {
+                  console.error('[ForceFieldCanvas] ERROR storing in closure ref:', error);
+                }
+                
+                // Also try to store in component ref (backup)
+                try {
+                  // Verify the ref is actually a ref object
+                  if (recordedParticleStatesRef && typeof recordedParticleStatesRef === 'object' && 'current' in recordedParticleStatesRef) {
+                    recordedParticleStatesRef.current = states;
+                    console.log('[ForceFieldCanvas] Stored in component ref, current value:', recordedParticleStatesRef.current?.length || 0, 'frames');
+                  } else {
+                    console.warn('[ForceFieldCanvas] WARNING: recordedParticleStatesRef is not a valid ref object:', typeof recordedParticleStatesRef, recordedParticleStatesRef);
+                  }
+                } catch (error) {
+                  console.warn('[ForceFieldCanvas] Could not store in recordedParticleStatesRef, using closure ref only:', error);
+                }
+                
+                console.log('[ForceFieldCanvas] Final stored states count:', recordedStatesClosureRef.current?.length || 0, 'frames');
+              } else {
+                console.error('[ForceFieldCanvas] ERROR: engineRef.current is null!');
+              }
+              
+              // restore canvas size
+              const restoreSize = restoreSizeRef.current;
+              if (restoreSize) {
+                console.log('[ForceFieldCanvas] Restoring canvas size:', restoreSize);
+                setDesiredCanvasSize(restoreSize);
+                restoreSizeRef.current = null;
+              }
+            } catch (error) {
+              console.error('[ForceFieldCanvas] ERROR in mr.onstop:', error);
+              setIsRecording(false);
+            }
           };
           mr.start(100); // Request data every 100ms
           mediaRecorderRef.current = mr;
           setIsRecording(true);
+          // Start particle state recording
+          if (engineRef.current) {
+            console.log('[ForceFieldCanvas] Starting state recording at', exportSettings.fps || 60, 'FPS');
+            engineRef.current.startStateRecording(exportSettings.fps || 60);
+            console.log('[ForceFieldCanvas] State recording started successfully');
+          } else {
+            console.error('[ForceFieldCanvas] ERROR: engineRef.current is null, cannot start state recording!');
+          }
         }, 200); // Slightly longer delay to ensure canvas is ready
       } catch (e) {
         console.warn('Failed to start recording', e);
         setIsRecording(false);
       }
     };
-
+    
     const stop = () => {
       const mr = mediaRecorderRef.current;
       if (mr && mr.state !== 'inactive') {
         try { mr.stop(); } catch {}
       }
+      // Note: State recording is stopped in mr.onstop to ensure it happens after recording completes
     };
 
-    setRecorderControl({ start, stop });
+    setRecorderControl({ 
+      start, 
+      stop,
+      getRecordedStates: () => {
+        console.log('[ForceFieldCanvas] getRecordedStates called');
+        const closureStates = recordedStatesClosureRef.current;
+        const refStates = recordedParticleStatesRef.current;
+        console.log('[ForceFieldCanvas] Closure ref states:', closureStates?.length || 0, 'frames');
+        console.log('[ForceFieldCanvas] Component ref states:', refStates?.length || 0, 'frames');
+        
+        const result = closureStates || refStates;
+        console.log('[ForceFieldCanvas] Returning states:', result?.length || 0, 'frames');
+        
+        if (!result || result.length === 0) {
+          console.error('[ForceFieldCanvas] ERROR: No recorded states available!');
+          console.error('[ForceFieldCanvas] Closure ref:', closureStates);
+          console.error('[ForceFieldCanvas] Component ref:', refStates);
+        }
+        
+        return result;
+      },
+    });
     return () => { setRecorderControl(null); };
   }, [canvasRef.current, exportSettings, canvasSize, desiredCanvasSize]);
 
@@ -269,16 +394,36 @@ export function ForceFieldCanvas() {
     };
   }, [handleKeyDown, handleKeyUp]);
 
-  // Animation loop
+  // Animation loop - use refs to avoid recreating callback
+  const settingsRef = useRef(settings);
+  const canvasSizeRef = useRef(canvasSize);
+  const isRecordingRef = useRef(isRecording);
+  const exportSettingsRef = useRef(exportSettings);
+  
+  // Update refs when values change
+  useEffect(() => {
+    settingsRef.current = settings;
+  }, [settings]);
+  useEffect(() => {
+    canvasSizeRef.current = canvasSize;
+  }, [canvasSize]);
+  useEffect(() => {
+    isRecordingRef.current = isRecording;
+  }, [isRecording]);
+  useEffect(() => {
+    exportSettingsRef.current = exportSettings;
+  }, [exportSettings]);
+
+  // Animation loop - stable callback that doesn't recreate
   const animate = useCallback(() => {
     if (!canvasRef.current || !engineRef.current) return;
 
     const now = performance.now();
-    const targetFps = isRecording ? (exportSettings.fps || 60) : 60;
+    const targetFps = isRecordingRef.current ? (exportSettingsRef.current.fps || 60) : 60;
     const frameTime = 1000 / targetFps;
 
     // Frame rate limiting during recording
-    if (isRecording) {
+    if (isRecordingRef.current) {
       const elapsed = now - lastFrameTimeRef.current;
       if (elapsed < frameTime) {
         // Skip this frame to maintain target FPS
@@ -292,69 +437,52 @@ export function ForceFieldCanvas() {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    // Set canvas dimensions
-    canvas.width = canvasSize.width;
-    canvas.height = canvasSize.height;
+    // Set canvas dimensions only if they changed (avoid clearing canvas unnecessarily)
+    const currentCanvasSize = canvasSizeRef.current;
+    if (canvas.width !== currentCanvasSize.width || canvas.height !== currentCanvasSize.height) {
+      canvas.width = currentCanvasSize.width;
+      canvas.height = currentCanvasSize.height;
+    }
 
     // Always draw background color first
-    ctx.fillStyle = settings.canvasBackgroundColor;
+    const currentSettings = settingsRef.current;
+    ctx.fillStyle = currentSettings.canvasBackgroundColor;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
     // Draw background image on top of background color (if present)
-    if (settings.backgroundImage?.imageDataUrl && backgroundImageRef.current) {
+    if (currentSettings.backgroundImage?.imageDataUrl && backgroundImageRef.current) {
       const img = backgroundImageRef.current;
       ctx.save();
       const centerX = canvas.width / 2;
       const centerY = canvas.height / 2;
       
       // Move to center for rotation
-      ctx.translate(centerX + settings.backgroundImage.positionX, 
-                   centerY + settings.backgroundImage.positionY);
-      ctx.rotate((settings.backgroundImage.rotation * Math.PI) / 180);
-      ctx.scale(settings.backgroundImage.scale, settings.backgroundImage.scale);
+      ctx.translate(centerX + currentSettings.backgroundImage.positionX, 
+                   centerY + currentSettings.backgroundImage.positionY);
+      ctx.rotate((currentSettings.backgroundImage.rotation * Math.PI) / 180);
+      ctx.scale(currentSettings.backgroundImage.scale, currentSettings.backgroundImage.scale);
       
-      // Calculate draw dimensions
-      const drawWidth = settings.backgroundImage.width ?? img.width;
-      const drawHeight = settings.backgroundImage.height ?? img.height;
+      // Calculate draw dimensions - use original dimensions as fallback for non-squared images
+      const drawWidth = currentSettings.backgroundImage.width ?? currentSettings.backgroundImage.originalWidth ?? img.width;
+      const drawHeight = currentSettings.backgroundImage.height ?? currentSettings.backgroundImage.originalHeight ?? img.height;
       
       // Draw from center
       ctx.drawImage(img, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight);
       ctx.restore();
     }
 
-    // Disable adaptive rendering during recording for full quality
-    const wasAdaptiveEnabled = settings.performance?.adaptiveEnabled;
-    if (isRecording && wasAdaptiveEnabled && engineRef.current) {
-      // Temporarily disable adaptive rendering
-      engineRef.current.updateSettings({
-        performance: {
-          ...settings.performance,
-          adaptiveEnabled: false,
-          visibleFraction: 1.0,
-        },
-      });
-    }
-
-    // Update and draw particles with opacity
+    // Update particles first (this is the heavy operation)
     engineRef.current.updateParticles();
+
+    // Draw particles with opacity
     ctx.save();
-    ctx.globalAlpha = settings.particleOpacity;
+    ctx.globalAlpha = currentSettings.particleOpacity;
     engineRef.current.drawParticles(ctx);
     ctx.restore();
 
-    // Restore adaptive settings after drawing
-    if (isRecording && wasAdaptiveEnabled && engineRef.current) {
-      engineRef.current.updateSettings({
-        performance: {
-          ...settings.performance,
-          adaptiveEnabled: wasAdaptiveEnabled,
-        },
-      });
-    }
-
     // Always continue the animation loop
     animationRef.current = requestAnimationFrame(animate);
-  }, [settings.canvasBackgroundColor, settings.backgroundImage, settings.particleOpacity, settings.performance, canvasSize, isRecording, exportSettings.fps]);
+  }, []); // Empty deps - use refs to access current values
 
   // Start animation and keep it running
   useEffect(() => {
@@ -404,7 +532,16 @@ export function ForceFieldCanvas() {
     }
   }, [fps, settings.performance]);
 
-  // Mouse event handlers
+  // Mouse event handlers - use refs to avoid recreating callbacks
+  const setMousePositionRef = useRef(setMousePosition);
+  useEffect(() => {
+    setMousePositionRef.current = setMousePosition;
+  }, [setMousePosition]);
+
+  // Throttle store updates to avoid performance issues
+  const lastStoreUpdateRef = useRef(0);
+  const STORE_UPDATE_INTERVAL = 100; // Update store at most every 100ms
+
   const handleMouseMove = useCallback((event: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -416,24 +553,38 @@ export function ForceFieldCanvas() {
     const x = (event.clientX - rect.left) * scaleX;
     const y = (event.clientY - rect.top) * scaleY;
     
-    // Update mouse position directly in the engine for smooth force application
+    // Update mouse position directly in the engine for smooth force application (this is critical)
     if (engineRef.current) {
       engineRef.current.setMousePosition(x, y, true);
     }
+
+    // Record event if recording
+    if (eventRecorder.isRecordingActive()) {
+      eventRecorder.recordMouseMove(x, y);
+    }
     
-    // Also update the store for other components that might need it
-    setMousePosition({ x, y, active: true });
-  }, [setMousePosition]);
+    // Throttle store updates to avoid expensive re-renders on every mouse move
+    const now = performance.now();
+    if (now - lastStoreUpdateRef.current >= STORE_UPDATE_INTERVAL) {
+      setMousePositionRef.current({ x, y, active: true });
+      lastStoreUpdateRef.current = now;
+    }
+  }, []);
 
   const handleMouseLeave = useCallback(() => {
     // Update mouse position directly in the engine
     if (engineRef.current) {
       engineRef.current.setMousePosition(0, 0, false);
     }
+
+    // Record event if recording
+    if (eventRecorder.isRecordingActive()) {
+      eventRecorder.recordMouseLeave();
+    }
     
-    // Also update the store
-    setMousePosition({ x: 0, y: 0, active: false });
-  }, [setMousePosition]);
+    // Update the store immediately on leave (not throttled)
+    setMousePositionRef.current({ x: 0, y: 0, active: false });
+  }, []);
 
   const handleMouseEnter = useCallback((event: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
@@ -450,10 +601,16 @@ export function ForceFieldCanvas() {
     if (engineRef.current) {
       engineRef.current.setMousePosition(x, y, true);
     }
+
+    // Record event if recording
+    if (eventRecorder.isRecordingActive()) {
+      eventRecorder.recordMouseEnter();
+    }
     
-    // Also update the store
-    setMousePosition({ x, y, active: true });
-  }, [setMousePosition]);
+    // Update the store immediately on enter (not throttled)
+    setMousePositionRef.current({ x, y, active: true });
+    lastStoreUpdateRef.current = performance.now();
+  }, []);
 
   const handleCanvasClick = useCallback(() => {
     // Focus the canvas when clicked to enable keyboard events

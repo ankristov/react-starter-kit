@@ -1,4 +1,4 @@
-import type { Particle, ForceFieldSettings, MousePosition, ForcePulse } from '../types/particle';
+import type { Particle, ForceFieldSettings, MousePosition, ForcePulse, RecordedFrame } from '../types/particle';
 import { getColorDistance } from './colorUtils';
 
 export class ParticleEngine {
@@ -15,6 +15,14 @@ export class ParticleEngine {
   private activePulses: Array<ForcePulse & { id: string; start: number } > = [];
   // For randomize effect: store random target positions per particle
   private randomizeTargets: Map<string, Map<number, { x: number; y: number }>> = new Map();
+  // For state recording: store particle states during recording
+  // OPTIMIZATION: Only store what we need for rendering to minimize memory and CPU overhead
+  private isRecordingStates: boolean = false;
+  private recordedFrames: Array<{ timestamp: number; particles: Array<{ x: number; y: number; color: string; size: number; shape: 'circle' | 'square' | 'triangle'; visible: boolean }> }> = [];
+  private recordingStartTime: number = 0;
+  private recordingFps: number = 30; // Record at 30fps to minimize overhead (animation still runs at 60fps)
+  private lastRecordedFrameTime: number = 0;
+  private replayBaseTime: number | undefined; // Base time for replay pulse timing
 
   constructor(settings: ForceFieldSettings) {
     this.settings = settings;
@@ -571,8 +579,9 @@ export class ParticleEngine {
         particle.vx += ax; particle.vy += ay;
       }
 
-      // Apply forces based on mouse position (allow continuous mode to sustain force without movement)
-      // Also apply if force was just re-enabled to ensure immediate response
+      // Apply forces based on mouse position
+      // Apply force if mouse is active AND (has moved OR continuous mode OR force just enabled)
+      // This ensures immediate response while avoiding unnecessary calculations when mouse is stationary
       if (mouseActive && (this.mouseHasMoved || continuous || this.forceWasJustEnabled)) {
         const dx = mouseX - particle.x;
         const dy = mouseY - particle.y;
@@ -697,6 +706,51 @@ export class ParticleEngine {
           particle.y = this.canvasHeight - particle.size;
           particle.vy = -particle.vy * 0.8;
         }
+      }
+    }
+    
+    // Record particle state if recording (after all updates)
+    // Only do this check if actually recording to avoid overhead when not recording
+    if (this.isRecordingStates) {
+      try {
+        const now = performance.now();
+        const frameInterval = 1000 / this.recordingFps;
+        const timeSinceStart = now - this.recordingStartTime;
+        const timeSinceLastFrame = timeSinceStart - this.lastRecordedFrameTime;
+        
+        // Record frame if enough time has passed since last frame, or if this is the first frame
+        if (this.lastRecordedFrameTime === 0 || timeSinceLastFrame >= frameInterval) {
+          const timestamp = timeSinceStart;
+          // OPTIMIZATION: Only record position + appearance data, skip velocity & original position
+          // This reduces per-particle data from ~100 bytes to ~40 bytes (60% reduction)
+          const particleCount = this.particles.length;
+          const recordedParticles = new Array(particleCount);
+          for (let i = 0; i < particleCount; i++) {
+            const p = this.particles[i];
+            recordedParticles[i] = {
+              x: p.x,
+              y: p.y,
+              color: p.color,
+              size: p.size,
+              shape: p.shape,
+              visible: p.visible ?? true,
+            };
+          }
+          const frame = {
+            timestamp,
+            particles: recordedParticles,
+          };
+          this.recordedFrames.push(frame);
+          this.lastRecordedFrameTime = timestamp;
+          
+          // Log every 60 frames to track progress without spamming
+          if (this.recordedFrames.length % 60 === 0) {
+            console.log('[ParticleEngine] Recorded', this.recordedFrames.length, 'frames so far (~', Math.round(this.recordedFrames.length / 30), 'sec)');
+          }
+        }
+      } catch (error) {
+        console.error('[ParticleEngine] ERROR recording particle state:', error);
+        // Don't stop recording on error, just log it
       }
     }
     
@@ -1049,6 +1103,42 @@ export class ParticleEngine {
     return this.particles;
   }
 
+  // State recording methods
+  startStateRecording(fps: number = 30): void {
+    console.log('[ParticleEngine] startStateRecording called with FPS:', fps);
+    console.log('[ParticleEngine] ℹ️  Recording at 30fps reduces overhead while keeping smooth motion');
+    this.isRecordingStates = true;
+    this.recordedFrames = [];
+    this.recordingStartTime = performance.now();
+    this.recordingFps = fps;
+    this.lastRecordedFrameTime = 0;
+    console.log('[ParticleEngine] Started state recording at', fps, 'FPS, startTime:', this.recordingStartTime);
+  }
+
+  stopStateRecording(): void {
+    console.log('[ParticleEngine] stopStateRecording called');
+    console.log('[ParticleEngine] isRecordingStates was:', this.isRecordingStates);
+    console.log('[ParticleEngine] Total frames recorded:', this.recordedFrames.length);
+    this.isRecordingStates = false;
+    
+    if (this.recordedFrames.length > 0) {
+      console.log('[ParticleEngine] First frame timestamp:', this.recordedFrames[0]?.timestamp);
+      console.log('[ParticleEngine] Last frame timestamp:', this.recordedFrames[this.recordedFrames.length - 1]?.timestamp);
+      console.log('[ParticleEngine] First frame particle count:', this.recordedFrames[0]?.particles?.length || 0);
+    } else {
+      console.warn('[ParticleEngine] WARNING: No frames were recorded!');
+    }
+  }
+
+  getRecordedStates(): RecordedFrame[] {
+    console.log('[ParticleEngine] getRecordedStates called, returning', this.recordedFrames.length, 'frames');
+    return this.recordedFrames;
+  }
+
+  clearRecordedStates(): void {
+    this.recordedFrames = [];
+  }
+
   getParticleCount(): number {
     return this.particles.length;
   }
@@ -1209,5 +1299,70 @@ export class ParticleEngine {
     
     particle.vx += noiseX * force * forceMultiplier;
     particle.vy += noiseY * force * forceMultiplier;
+  }
+
+  addPulse(pulse: ForcePulse): string {
+    const id = `pulse-${Date.now()}-${Math.random()}`;
+    
+    // Check if this is a replay pulse with recordedEventTimestamp
+    let startTime = performance.now();
+    if ((pulse as any).recordedEventTimestamp !== undefined && this.replayBaseTime !== undefined) {
+      // For replay: calculate start time relative to replayBaseTime
+      // so that pulse progress calculation works correctly
+      startTime = this.replayBaseTime + (pulse as any).recordedEventTimestamp;
+    }
+    
+    this.activePulses.push({
+      ...pulse,
+      id,
+      start: startTime,
+    });
+    return id;
+  }
+
+  /**
+   * Set base time for replay - used to properly time pulses during replay
+   */
+  setReplayBaseTime(baseTime: number): void {
+    this.replayBaseTime = baseTime;
+  }
+
+  removePulse(id: string): void {
+    this.activePulses = this.activePulses.filter(p => p.id !== id);
+  }
+
+  clearPulses(): void {
+    this.activePulses = [];
+  }
+
+  getPulses(): Array<ForcePulse & { id: string }> {
+    return this.activePulses.map(({ id, start, ...pulse }) => ({
+      ...pulse,
+      id,
+    })) as any[];
+  }
+
+  getMousePosition(): { x: number; y: number; active: boolean } {
+    return { ...this.mousePosition };
+  }
+
+  /**
+   * Regenerate particles from current settings (for initial replay setup)
+   */
+  regenerateParticles(): void {
+    const defaultImageData = new ImageData(
+      new Uint8ClampedArray(this.canvasWidth * this.canvasHeight * 4).fill(0),
+      this.canvasWidth,
+      this.canvasHeight
+    );
+    // Fill with a simple gradient or default pattern
+    const data = defaultImageData.data;
+    for (let i = 0; i < data.length; i += 4) {
+      data[i] = 100;      // R
+      data[i + 1] = 100;  // G
+      data[i + 2] = 150;  // B
+      data[i + 3] = 255;  // A
+    }
+    this.particles = this.generateParticlesFromImage(defaultImageData);
   }
 } 

@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>COOP/COEP Header Check</title>
+    <style>
+        body {
+            font-family: monospace;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .status {
+            padding: 15px;
+            margin: 10px 0;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        .pass {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .fail {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .info {
+            background: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+        }
+        h1 {
+            margin-top: 0;
+        }
+    </style>
+</head>
+<body>
+    <h1>🔍 COOP/COEP Header Verification</h1>
+    
+    <div id="results"></div>
+    
+    <script>
+        async function checkHeaders() {
+            const results = document.getElementById('results');
+            const checks = [];
+            
+            // Check 1: Cross-Origin Isolation
+            const crossOriginIsolated = self.crossOriginIsolated;
+            checks.push({
+                name: 'Cross-Origin Isolation (self.crossOriginIsolated)',
+                value: crossOriginIsolated,
+                status: crossOriginIsolated ? 'pass' : 'fail'
+            });
+            
+            // Check 2: SharedArrayBuffer
+            const hasSharedArrayBuffer = typeof SharedArrayBuffer !== 'undefined';
+            checks.push({
+                name: 'SharedArrayBuffer Available',
+                value: hasSharedArrayBuffer,
+                status: hasSharedArrayBuffer ? 'pass' : 'fail'
+            });
+            
+            // Check 3: Fetch and check headers on response
+            try {
+                const response = await fetch('/index.html');
+                const coop = response.headers.get('Cross-Origin-Opener-Policy');
+                const coep = response.headers.get('Cross-Origin-Embedder-Policy');
+                const corp = response.headers.get('Cross-Origin-Resource-Policy');
+                
+                checks.push({
+                    name: 'Cross-Origin-Opener-Policy Header',
+                    value: coop ? `${coop}` : 'NOT SET',
+                    status: coop ? 'pass' : 'fail'
+                });
+                
+                checks.push({
+                    name: 'Cross-Origin-Embedder-Policy Header',
+                    value: coep ? `${coep}` : 'NOT SET',
+                    status: coep ? 'pass' : 'fail'
+                });
+                
+                checks.push({
+                    name: 'Cross-Origin-Resource-Policy Header',
+                    value: corp ? `${corp}` : 'NOT SET',
+                    status: corp ? 'pass' : 'fail'
+                });
+            } catch (e) {
+                checks.push({
+                    name: 'Header Fetch',
+                    value: `Error: ${e.message}`,
+                    status: 'fail'
+                });
+            }
+            
+            // Render results
+            checks.forEach(check => {
+                const div = document.createElement('div');
+                div.className = `status ${check.status}`;
+                const icon = check.status === 'pass' ? '✅' : '❌';
+                div.textContent = `${icon} ${check.name}: ${check.value}`;
+                results.appendChild(div);
+            });
+            
+            // Summary
+            const allPass = checks.every(c => c.status === 'pass');
+            const summary = document.createElement('div');
+            summary.className = `status ${allPass ? 'pass' : 'fail'}`;
+            summary.innerHTML = `<strong>${allPass ? '✅ All checks passed!' : '❌ Some checks failed'}</strong>`;
+            results.appendChild(summary);
+            
+            // Recommendations
+            if (!allPass) {
+                const info = document.createElement('div');
+                info.className = 'status info';
+                info.innerHTML = `
+                    <strong>⚠️ Troubleshooting:</strong><br>
+                    1. Make sure the Vite dev server is running<br>
+                    2. Check vite.config.ts has the coopCoepPlugin configured<br>
+                    3. Hard refresh the page (Cmd+Shift+R on Mac)<br>
+                    4. Check browser console for errors<br>
+                    5. If headers aren't sent, the plugin might not be working
+                `;
+                results.appendChild(info);
+            }
+        }
+        
+        checkHeaders();
+    </script>
+</body>
+</html>
