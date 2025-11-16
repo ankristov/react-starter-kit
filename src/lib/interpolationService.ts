@@ -3,7 +3,7 @@
  * Communicates with Node.js FFmpeg backend to smooth videos
  */
 
-const INTERPOLATION_SERVER = 'http://localhost:3001';
+const INTERPOLATION_SERVER = 'http://localhost:3002';
 
 export interface InterpolationOptions {
   targetFps?: number;

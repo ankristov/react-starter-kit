@@ -15,7 +15,7 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
 # Ports
 DEV_PORT=5174
-INTERPOLATE_PORT=3001
+INTERPOLATE_PORT=3002
 
 # Check for --with-interpolate flag
 START_INTERPOLATE=false
