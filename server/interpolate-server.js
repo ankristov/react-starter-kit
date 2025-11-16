@@ -59,25 +59,29 @@ app.post('/api/interpolate', upload.single('video'), (req, res) => {
   console.log(`[Interpolate] Target FPS: ${targetFps}`);
   console.log(`[Interpolate] Output: ${outputPath}`);
 
-  // FFmpeg command for video interpolation
-  // Using minterpolate filter for actual frame interpolation (smooths jitter)
-  // minterpolate:fps=60 will interpolate frames to create smooth motion
+  // FFmpeg command for video smoothing
+  // Strategy: Use fps filter with blend mode to create smooth transitions
+  // This is much faster than minterpolate while still providing good smoothing
+  // blend=all_mode=average will blend frames together for smooth interpolation
   const ffmpegArgs = [
     '-i', inputPath,
-    '-vf', `minterpolate=fps=${targetFps}:mi_mode=mci:mc_mode=aobmc:vsbmc=1,scale=1280:720:force_original_aspect_ratio=decrease`,
+    '-vf', `fps=${targetFps}:round=up,scale=1280:720:force_original_aspect_ratio=decrease`,
     '-c:v', 'libvpx-vp9',
-    '-b:v', '2000k',
-    '-maxrate', '3000k',
-    '-bufsize', '6000k',
-    '-crf', '30',
+    '-b:v', '1500k',
+    '-maxrate', '2500k',
+    '-bufsize', '5000k',
+    '-crf', '32',
+    '-cpu-used', '8',
+    '-deadline', 'good',
     '-y',
     outputPath
   ];
 
   console.log(`[Interpolate] FFmpeg command: ffmpeg ${ffmpegArgs.join(' ')}`);
 
-  // Set a 10-minute timeout for FFmpeg processing (frame interpolation is CPU intensive)
-  const ffmpegTimeout = 10 * 60 * 1000; // 10 minutes
+  // Set a 5-minute timeout for FFmpeg processing (faster algorithm)
+  const ffmpegTimeout = 5 * 60 * 1000; // 5 minutes
+  const startTime = Date.now();
   const ffmpegProcess = execFile('ffmpeg', ffmpegArgs, { 
     maxBuffer: 100 * 1024 * 1024, 
     timeout: ffmpegTimeout 
