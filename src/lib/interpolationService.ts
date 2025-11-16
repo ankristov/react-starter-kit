@@ -60,29 +60,56 @@ export async function interpolateVideo(
     console.log('[InterpolationService] Sending video to server:', INTERPOLATION_SERVER);
     onProgress?.(20, 'Sending video to server...');
 
-    // Send to interpolation server with a 30-second timeout for upload
+    // Send to interpolation server with a 5-minute timeout for the entire operation
+    // (upload + FFmpeg processing + download)
     const controller = new AbortController();
-    const uploadTimeoutId = setTimeout(() => controller.abort(), 30000);
+    const timeout = 5 * 60 * 1000; // 5 minutes
+    const timeoutId = setTimeout(() => {
+      console.error('[InterpolationService] Request timeout after', timeout, 'ms');
+      controller.abort();
+    }, timeout);
     
     const startTime = Date.now();
-    const response = await fetch(
-      `${INTERPOLATION_SERVER}/api/interpolate?targetFps=${targetFps}`,
-      {
-        method: 'POST',
-        body: formData,
-        mode: 'cors',
-        signal: controller.signal,
+    let response;
+    
+    try {
+      response = await fetch(
+        `${INTERPOLATION_SERVER}/api/interpolate?targetFps=${targetFps}`,
+        {
+          method: 'POST',
+          body: formData,
+          mode: 'cors',
+          signal: controller.signal,
+        }
+      );
+    } catch (fetchError) {
+      clearTimeout(timeoutId);
+      if ((fetchError as Error).name === 'AbortError') {
+        throw new Error(`Request timeout: Video processing took longer than ${timeout / 1000} seconds`);
       }
-    );
+      throw fetchError;
+    }
 
-    clearTimeout(uploadTimeoutId);
+    clearTimeout(timeoutId);
     console.log('[InterpolationService] Server response status:', response.status);
 
     if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(
-        errorData.error || `Server error: ${response.statusText}`
-      );
+      let errorMessage = `Server error: ${response.statusText}`;
+      
+      try {
+        const contentType = response.headers.get('content-type');
+        if (contentType?.includes('application/json')) {
+          const errorData = await response.json();
+          errorMessage = errorData.error || errorData.details || errorMessage;
+        } else {
+          const text = await response.text();
+          errorMessage = text || errorMessage;
+        }
+      } catch (parseError) {
+        console.warn('[InterpolationService] Could not parse error response:', parseError);
+      }
+      
+      throw new Error(errorMessage);
     }
 
     console.log('[InterpolationService] Processing response blob...');

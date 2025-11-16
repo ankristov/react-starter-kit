@@ -77,7 +77,12 @@ app.post('/api/interpolate', upload.single('video'), (req, res) => {
 
   console.log(`[Interpolate] FFmpeg command: ffmpeg ${ffmpegArgs.join(' ')}`);
 
-  execFile('ffmpeg', ffmpegArgs, { maxBuffer: 100 * 1024 * 1024, timeout: 5 * 60 * 1000 }, (error, stdout, stderr) => {
+  // Set a 5-minute timeout for FFmpeg processing
+  const ffmpegTimeout = 5 * 60 * 1000; // 5 minutes
+  const ffmpegProcess = execFile('ffmpeg', ffmpegArgs, { 
+    maxBuffer: 100 * 1024 * 1024, 
+    timeout: ffmpegTimeout 
+  }, (error, stdout, stderr) => {
     // Clean up input file
     fs.unlink(inputPath, (err) => {
       if (err) console.warn(`[Interpolate] Failed to delete input file: ${err}`);
@@ -85,13 +90,20 @@ app.post('/api/interpolate', upload.single('video'), (req, res) => {
 
     if (error) {
       console.error(`[Interpolate] FFmpeg error:`, error.message);
+      console.error(`[Interpolate] Error code:`, error.code);
+      
       // Clean up output file if it exists
       fs.unlink(outputPath, (err) => {
         if (err) console.warn(`[Interpolate] Failed to delete output file: ${err}`);
       });
+      
+      const errorMessage = error.code === 'ETIMEDOUT' 
+        ? 'Video processing timed out after 5 minutes'
+        : error.message;
+      
       return res.status(500).json({ 
         error: 'Video interpolation failed',
-        details: error.message 
+        details: errorMessage
       });
     }
 
@@ -116,6 +128,21 @@ app.post('/api/interpolate', upload.single('video'), (req, res) => {
       fs.unlink(outputPath, (err) => {
         if (err) console.warn(`[Interpolate] Failed to delete output file: ${err}`);
       });
+    });
+  });
+  
+  // Handle process errors (e.g., FFmpeg not found)
+  ffmpegProcess.on('error', (error) => {
+    console.error(`[Interpolate] Process error:`, error);
+    fs.unlink(inputPath, (err) => {
+      if (err) console.warn(`[Interpolate] Failed to delete input file: ${err}`);
+    });
+    fs.unlink(outputPath, (err) => {
+      if (err) console.warn(`[Interpolate] Failed to delete output file: ${err}`);
+    });
+    res.status(500).json({ 
+      error: 'Failed to start FFmpeg process',
+      details: error.message 
     });
   });
 });
