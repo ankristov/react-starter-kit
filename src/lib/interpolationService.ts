@@ -60,10 +60,11 @@ export async function interpolateVideo(
     console.log('[InterpolationService] Sending video to server:', INTERPOLATION_SERVER);
     onProgress?.(20, 'Sending video to server...');
 
-    // Send to interpolation server with a 5-minute timeout for the entire operation
-    // (upload + FFmpeg processing + download)
+    // Send to interpolation server with a 10-minute timeout for the entire operation
+    // (upload + frame interpolation processing + download)
+    // Frame interpolation is CPU-intensive and requires more time
     const controller = new AbortController();
-    const timeout = 5 * 60 * 1000; // 5 minutes
+    const timeout = 10 * 60 * 1000; // 10 minutes
     const timeoutId = setTimeout(() => {
       console.error('[InterpolationService] Request timeout after', timeout, 'ms');
       controller.abort();
