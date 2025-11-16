@@ -385,14 +385,28 @@ export function ControlPanel() {
                       <span title="Number of particles generated from the image. Higher density = more particles and finer detail but heavier on performance."><Info className="w-3.5 h-3.5 opacity-80" /></span>
                     </span>
                   </label>
-                  <Slider
-                    value={[settings.particleDensity]}
-                    onValueChange={handleDensityChange}
-                    max={50000}
-                    min={1000}
-                    step={1000}
-                    className="w-full"
-                  />
+                  <div className="flex gap-2 items-center">
+                    <Slider
+                      value={[settings.particleDensity]}
+                      onValueChange={handleDensityChange}
+                      max={50000}
+                      min={100}
+                      step={100}
+                      className="flex-1"
+                    />
+                    <input
+                      type="number"
+                      value={settings.particleDensity}
+                      onChange={(e) => {
+                        const newValue = Math.max(100, Math.min(50000, parseInt(e.target.value) || 100));
+                        handleDensityChange([newValue]);
+                      }}
+                      min={100}
+                      max={50000}
+                      step={100}
+                      className="w-20 px-2 py-1 text-sm bg-slate-800 border border-slate-700 rounded text-purple-200 text-center"
+                    />
+                  </div>
                   <div className="text-xs text-purple-300/70 mt-1">{particleCount} particles</div>
                 </div>
           <div className="sm:col-span-2">
