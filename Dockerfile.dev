@@ -1,0 +1,35 @@
+# Development Dockerfile with all services
+# Usage: docker build -f Dockerfile.dev -t forcefield:dev .
+# Run: docker run -p 5174:5174 -p 3002:3002 forcefield:dev
+
+FROM node:20-alpine
+
+WORKDIR /app
+
+# Install FFmpeg for video interpolation
+RUN apk add --no-cache ffmpeg
+
+# Copy package files
+COPY package*.json ./
+COPY server/package*.json ./server/
+
+# Install main dependencies
+RUN npm ci
+
+# Install server dependencies
+WORKDIR /app/server
+RUN npm ci
+
+WORKDIR /app
+
+# Copy all source files
+COPY . .
+
+# Prepare FFmpeg files
+RUN npm run predev
+
+# Expose ports
+EXPOSE 5174 3002
+
+# Run both dev server and interpolation server
+CMD ["sh", "-c", "npm run dev-interpolate-server & npm run dev"]
