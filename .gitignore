@@ -6,3 +6,64 @@
 /build/
 
 .env.local
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Heavy Media Files - DO NOT COMMIT
+# ═════════════════════════════════════════════════════════════════════════════
+# Video files can be 100MB+ and will bloat the repository
+# Use cloud storage (Google Drive, Dropbox, AWS S3) for media assets
+
+# Video formats
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.flv
+*.wmv
+*.webm
+*.m4v
+*.mpg
+*.mpeg
+*.3gp
+*.ogv
+
+# Audio files
+*.mp3
+*.wav
+*.aac
+*.flac
+*.m4a
+*.wma
+*.ogg
+
+# Image sequences (can accumulate to large sizes)
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.tiff
+*.tif
+
+# Raw video/media data
+*.raw
+*.yuv
+*.pcm
+
+# Video processing temporary files
+/temp-uploads/
+/uploads/
+/processed-videos/
+/frame-sequences/
+
+# FFmpeg generated files
+*.ts
+*.m3u8
+/hls/
+/dash/
+
+# Recording/capture files
+*.webp
+*.avif
+
+# ═════════════════════════════════════════════════════════════════════════════
