@@ -11,7 +11,7 @@ import type { ForcePulseType } from '../types/particle';
 import { ColorFilter } from './ColorFilter';
 import { ChevronDown, ChevronRight, Info, X, Loader2, HelpCircle } from 'lucide-react';
 import { detectFormatMismatch } from '../lib/imageUtils';
-import { checkServerHealth, interpolateVideo, downloadBlob } from '../lib/interpolationService';
+import { AnimationRecorder, type AnimationRecording } from '../lib/deterministicRender';
 
 // Generate a hash for a file
 const generateFileHash = async (file: File): Promise<string> => {
@@ -36,6 +36,7 @@ export function ControlPanel() {
   
   const engineRef = useRef<ParticleEngine | null>(null);
   const currentImageDataRef = useRef<ImageData | null>(null);
+  const animationRecorderRef = useRef<InstanceType<typeof AnimationRecorder> | null>(null);
   
   const {
     settings,
@@ -52,8 +53,10 @@ export function ControlPanel() {
     isRecording,
     recordingUrl,
     recordingMimeType,
+    lastAnimationRecording,
     startRecording,
     stopRecording,
+    setLastAnimationRecording,
     // Presets
     presetNames,
     savePreset,
@@ -66,7 +69,68 @@ export function ControlPanel() {
     setParticleOpacity,
     saveDefaultState,
     loadDefaultState,
+    updatePulseConfig,
+    continuousForcePulseId,
+    setContinuousForcePulse,
   } = useForceFieldStore();
+
+  // Force Preset states (must be declared early to satisfy Hooks rules)
+  // Timing & Easing
+  const [pulseSelected, setPulseSelected] = useState<ForcePulseType>('burst');
+  const [pulseDuration, setPulseDuration] = useState<number>(1500);
+  const [pulseHoldTime, setPulseHoldTime] = useState<number>(0);
+  const [forceMode, setForceMode] = useState<'impulse' | 'continuous'>('impulse');
+  const [easeIn, setEaseIn] = useState<number>(0.2);
+  const [easeOut, setEaseOut] = useState<number>(0.2);
+  const [easeType, setEaseType] = useState<'linear' | 'ease-in' | 'ease-out' | 'ease-in-out' | 'ease-in-cubic' | 'ease-out-cubic' | 'ease-in-out-cubic' | 'ease-in-quad' | 'ease-out-quad' | 'ease-in-out-quad'>('ease-in-out-quad');
+  // Force Parameters
+  const [pulseStrength, setPulseStrength] = useState<number>(30);
+  const [pulseIntensity, setPulseIntensity] = useState<number>(1.0);
+  const [pulseRadius, setPulseRadius] = useState<number>(1500);
+  // Direction & Rotation
+  const [pulseDirectionDeg, setPulseDirectionDeg] = useState<number>(90);
+  const [pulseClockwise, setPulseClockwise] = useState<boolean>(true);
+  // Frequency & Chaos
+  const [pulseFrequency, setPulseFrequency] = useState<number>(1.5);
+  const [pulseChaos, setPulseChaos] = useState<number>(0.6);
+  // Origin (for centered forces)
+  const [pulseOriginX, setPulseOriginX] = useState<number>(0.5);
+  const [pulseOriginY, setPulseOriginY] = useState<number>(0.5);
+  // Wave & Spiral specific
+  const [pulseWaveCount, setPulseWaveCount] = useState<number>(3);
+  const [pulseSpiralTurns, setPulseSpiralTurns] = useState<number>(2);
+  // Randomize-specific controls
+  const [randomizeScatterSpeed, setRandomizeScatterSpeed] = useState<number>(3.0);
+  const [randomizeScatterDurationPercent, setRandomizeScatterDurationPercent] = useState<number>(30);
+  const [randomizeHoldTime, setRandomizeHoldTime] = useState<number>(500);
+  const [randomizeReturnDurationPercent, setRandomizeReturnDurationPercent] = useState<number>(40);
+  const [abortController, setAbortController] = useState<AbortController | null>(null);
+
+  // Canvas size preset controls
+  type CanvasPreset = 'original' | 'instagramReel' | 'youtube' | 'square' | 'custom';
+  const [canvasPreset, setCanvasPreset] = useState<CanvasPreset>('original');
+  const [customWidth, setCustomWidth] = useState<number>(desiredCanvasSize?.width || 800);
+  const [customHeight, setCustomHeight] = useState<number>(desiredCanvasSize?.height || 600);
+  
+  // Background image adjustment section state
+  const [showBackgroundAdjustments, setShowBackgroundAdjustments] = useState(false);
+  
+  // Grid size input - only apply on explicit button click
+  const [gridSizeInput, setGridSizeInput] = useState<string>((settings.imageCropGridSize ?? 16).toString());
+
+  // Accordion open/close state for sidebar sections
+  const [openSections, setOpenSections] = useState<Record<string, boolean>>({
+    main: true,
+    forcePresets: true,
+    forces: false,
+    visuals: false,
+    performance: false,
+    healing: false,
+    collisions: false,
+    particleInteractions: false,
+    colors: true,
+    export: true,
+  });
 
   // Ensure complete objects for nested settings when updating (to satisfy types)
   const currentVisual = {
@@ -98,6 +162,49 @@ export function ControlPanel() {
     radiusMultiplier: settings.collisions?.radiusMultiplier ?? 1.2,
   } as const;
 
+  const currentInteraction = {
+    elasticity: settings.particleInteraction?.elasticity ?? 0.5,
+    collisionStrength: settings.particleInteraction?.collisionStrength ?? 0.8,
+    friction: settings.particleInteraction?.friction ?? 0.5,
+  } as const;
+
+  // Preset interaction profiles
+  const interactionPresets = {
+    // Preset name: { restorationForce, motionResistance, damping, collisionsEnabled, collisionStrength, radiusMultiplier }
+    liquid: { 
+      restorationForce: 50, friction: 0.6, elasticity: 0.1, 
+      collisionsEnabled: true, collisionStrength: 0.3, radiusMultiplier: 1.2 
+    },
+    fluid: { 
+      restorationForce: 100, friction: 0.4, elasticity: 0.3, 
+      collisionsEnabled: true, collisionStrength: 0.5, radiusMultiplier: 1.3 
+    },
+    elastic: { 
+      restorationForce: 200, friction: 0.3, elasticity: 0.7, 
+      collisionsEnabled: true, collisionStrength: 0.8, radiusMultiplier: 1.4 
+    },
+    bouncy: { 
+      restorationForce: 150, friction: 0.2, elasticity: 1.0, 
+      collisionsEnabled: true, collisionStrength: 1.0, radiusMultiplier: 1.5 
+    },
+    sticky: { 
+      restorationForce: 300, friction: 0.7, elasticity: 0.05, 
+      collisionsEnabled: true, collisionStrength: 0.4, radiusMultiplier: 1.6 
+    },
+    rigid: { 
+      restorationForce: 400, friction: 0.1, elasticity: 0.9, 
+      collisionsEnabled: true, collisionStrength: 1.0, radiusMultiplier: 1.3 
+    },
+    floaty: { 
+      restorationForce: 50, friction: 0.1, elasticity: 0.5, 
+      collisionsEnabled: false, collisionStrength: 0.5, radiusMultiplier: 1.2 
+    },
+    solid: { 
+      restorationForce: 200, friction: 0.1, elasticity: 0.0, 
+      collisionsEnabled: true, collisionStrength: 1.0, radiusMultiplier: 1.4 
+    },
+  } as const;
+
   // Initialize with default image if no image is loaded
   useEffect(() => {
     if (!currentImageDataRef.current && particleCount === 0) {
@@ -112,17 +219,63 @@ export function ControlPanel() {
       setParticleCount(particles.length);
       engineRef.current = engine;
     }
-
-    // Check if interpolation server is available
-    checkServerHealth().then(available => {
-      setServerAvailable(available);
-      if (available) {
-        console.log('[ControlPanel] Interpolation server is available');
-      } else {
-        console.warn('[ControlPanel] Interpolation server is not available - start the server with: npm run start-interpolate-server');
-      }
-    });
   }, []); // Only run once on mount
+
+  // Sync pulse configuration to store whenever it changes
+  useEffect(() => {
+    const base: any = { 
+      type: pulseSelected, 
+      durationMs: pulseDuration,
+      holdTimeMs: pulseHoldTime,
+      strength: pulseStrength,
+      easeIn: easeIn,
+      easeOut: easeOut,
+      easeType: easeType,
+    };
+    // Direction-based types
+    if (['gravity','wind','crosswind','gravityFlip','waveLeft','waveUp'].includes(pulseSelected)) {
+      base.directionDeg = pulseDirectionDeg;
+    }
+    // Rotation-based types
+    if (['tornado','ringSpin'].includes(pulseSelected)) {
+      base.clockwise = pulseClockwise;
+    }
+    // Frequency-based types
+    if (['noise','ripple','waveLeft','waveUp','crosswind'].includes(pulseSelected)) {
+      base.frequency = pulseFrequency;
+    }
+    // Chaos-based types
+    if (['noise','randomJitter'].includes(pulseSelected)) {
+      base.chaos = pulseChaos;
+    }
+    // Origin-based types
+    if (['shockwave','ripple','burst','implosion','supernova','ringBurst','edgeBurst','multiBurst'].includes(pulseSelected)) {
+      base.origin = { normalized: true, x: pulseOriginX, y: pulseOriginY };
+    }
+    // Radius-based types
+    if (['burst','implosion','shockwave','supernova','ringBurst','edgeBurst'].includes(pulseSelected)) {
+      base.radius = pulseRadius;
+    }
+    // Intensity-based types
+    if (['supernova','quake','burst','implosion'].includes(pulseSelected)) {
+      base.intensity = pulseIntensity;
+    }
+    // Wave count for ripple/wave types
+    if (['ripple','waveLeft','waveUp'].includes(pulseSelected)) {
+      base.waveCount = pulseWaveCount;
+    }
+    // Spiral turns
+    if (['spiralIn','spiralOut'].includes(pulseSelected)) {
+      base.spiralTurns = pulseSpiralTurns;
+    }
+    // Randomize-specific
+    if (pulseSelected === 'randomize') {
+      base.scatterSpeed = randomizeScatterSpeed;
+      base.scatterDurationPercent = randomizeScatterDurationPercent;
+      base.returnDurationPercent = randomizeReturnDurationPercent;
+    }
+    updatePulseConfig(base);
+  }, [pulseSelected, pulseDuration, pulseHoldTime, pulseStrength, easeIn, easeOut, easeType, pulseDirectionDeg, pulseClockwise, pulseFrequency, pulseChaos, pulseOriginX, pulseOriginY, pulseRadius, pulseIntensity, pulseWaveCount, pulseSpiralTurns, randomizeScatterSpeed, randomizeScatterDurationPercent, randomizeReturnDurationPercent, updatePulseConfig]);
 
   const handleFileUpload = async (file: File) => {
     try {
@@ -178,7 +331,7 @@ export function ControlPanel() {
     }
   };
 
-  const regenerateParticles = (newDensity?: number, explicitSize?: { width: number; height: number }) => {
+  const regenerateParticles = (newDensity?: number, newGridSize?: number, explicitSize?: { width: number; height: number }) => {
     let imageData = currentImageDataRef.current;
     
     // If no image is loaded, create a default image
@@ -193,14 +346,22 @@ export function ControlPanel() {
     const currentSettings = storeState.settings;
     const currentDesiredSize = storeState.desiredCanvasSize;
     const densityToUse = newDensity ?? currentSettings.particleDensity;
-    const engine = new ParticleEngine({ ...currentSettings, particleDensity: densityToUse });
+    const gridSizeToUse = newGridSize ?? currentSettings.imageCropGridSize ?? 16;
+    const engine = new ParticleEngine({ ...currentSettings, particleDensity: densityToUse, imageCropGridSize: gridSizeToUse });
     // keep canvas size synced with desired size if set
     const target = explicitSize ?? currentDesiredSize ?? { width: imageData.width, height: imageData.height };
     setDesiredCanvasSize(target); // update store so canvas effect resizes too
     engine.setCanvasSize(target.width, target.height);
-    const particles = engine.generateParticlesFromImage(imageData);
     
-    console.log('Regenerated particles with density:', densityToUse, 'particles:', particles.length);
+    // Generate particles based on animation mode
+    let particles;
+    if (currentSettings.animationMode === 'imageCrops') {
+      particles = engine.generateParticlesFromImageTiles(imageData, gridSizeToUse);
+      console.log('Regenerated tile particles with grid size:', gridSizeToUse, 'particles:', particles.length);
+    } else {
+      particles = engine.generateParticlesFromImage(imageData);
+      console.log('Regenerated particles with density:', densityToUse, 'particles:', particles.length);
+    }
     
     setParticles(particles);
     setParticleCount(particles.length);
@@ -213,6 +374,15 @@ export function ControlPanel() {
     updateSettings({ particleDensity: newDensity });
     // Regenerate particles immediately - regenerateParticles will get latest settings from store
     regenerateParticles(newDensity);
+  };
+
+  const handleGridSizeRecalculate = () => {
+    const newGridSize = Math.max(8, Math.min(64, parseInt(gridSizeInput) || 16));
+    // Update input to valid value
+    setGridSizeInput(newGridSize.toString());
+    // Update settings and regenerate
+    updateSettings({ imageCropGridSize: newGridSize });
+    regenerateParticles(undefined, newGridSize);
   };
 
   const handleRefresh = () => {
@@ -242,64 +412,67 @@ export function ControlPanel() {
     updateSettings({ wallsEnabled: !settings.wallsEnabled });
   };
 
-  // Force Preset states (must be declared at top-level to satisfy Hooks rules)
-  // Timing & Easing
-  const [pulseSelected, setPulseSelected] = useState<ForcePulseType>('burst');
-  const [pulseDuration, setPulseDuration] = useState<number>(1500);
-  const [pulseHoldTime, setPulseHoldTime] = useState<number>(0);
-  const [easeIn, setEaseIn] = useState<number>(0.2);
-  const [easeOut, setEaseOut] = useState<number>(0.2);
-  const [easeType, setEaseType] = useState<'linear' | 'ease-in' | 'ease-out' | 'ease-in-out' | 'ease-in-cubic' | 'ease-out-cubic' | 'ease-in-out-cubic' | 'ease-in-quad' | 'ease-out-quad' | 'ease-in-out-quad'>('ease-in-out-quad');
-  // Force Parameters
-  const [pulseStrength, setPulseStrength] = useState<number>(30);
-  const [pulseIntensity, setPulseIntensity] = useState<number>(1.0);
-  const [pulseRadius, setPulseRadius] = useState<number>(1500);
-  // Direction & Rotation
-  const [pulseDirectionDeg, setPulseDirectionDeg] = useState<number>(90);
-  const [pulseClockwise, setPulseClockwise] = useState<boolean>(true);
-  // Frequency & Chaos
-  const [pulseFrequency, setPulseFrequency] = useState<number>(1.5);
-  const [pulseChaos, setPulseChaos] = useState<number>(0.6);
-  // Origin (for centered forces)
-  const [pulseOriginX, setPulseOriginX] = useState<number>(0.5);
-  const [pulseOriginY, setPulseOriginY] = useState<number>(0.5);
-  // Wave & Spiral specific
-  const [pulseWaveCount, setPulseWaveCount] = useState<number>(3);
-  const [pulseSpiralTurns, setPulseSpiralTurns] = useState<number>(2);
-  // Randomize-specific controls
-  const [randomizeScatterSpeed, setRandomizeScatterSpeed] = useState<number>(3.0);
-  const [randomizeScatterDurationPercent, setRandomizeScatterDurationPercent] = useState<number>(30);
-  const [randomizeHoldTime, setRandomizeHoldTime] = useState<number>(500);
-  const [randomizeReturnDurationPercent, setRandomizeReturnDurationPercent] = useState<number>(40);
-  // Video conversion progress
-  const [conversionProgress, setConversionProgress] = useState<{ progress: number; message: string } | null>(null);
-  const [abortController, setAbortController] = useState<AbortController | null>(null);
-  // Server health check
-  const [serverAvailable, setServerAvailable] = useState<boolean | null>(null);
+  const applyInteractionPreset = (preset: keyof typeof interactionPresets) => {
+    const preset_obj = interactionPresets[preset];
+    updateSettings({
+      restorationForce: preset_obj.restorationForce,
+      particleInteraction: {
+        elasticity: preset_obj.elasticity,
+        collisionStrength: preset_obj.collisionStrength,
+        friction: preset_obj.friction,
+      },
+      collisions: {
+        enabled: preset_obj.collisionsEnabled,
+        strength: 1.0, // default value
+        radiusMultiplier: preset_obj.radiusMultiplier,
+      }
+    });
+  };
 
-  // Canvas size preset controls
-  type CanvasPreset = 'original' | 'instagramReel' | 'youtube' | 'square' | 'custom';
-  const [canvasPreset, setCanvasPreset] = useState<CanvasPreset>('original');
-  const [customWidth, setCustomWidth] = useState<number>(desiredCanvasSize?.width || 800);
-  const [customHeight, setCustomHeight] = useState<number>(desiredCanvasSize?.height || 600);
-  
-  // Background image adjustment section state
-  const [showBackgroundAdjustments, setShowBackgroundAdjustments] = useState(false);
+  const handleStartAnimationRecording = () => {
+    if (!currentImageDataRef.current) {
+      console.warn('[AnimationRecorder] No image data, recording skipped');
+      return;
+    }
+    animationRecorderRef.current = new AnimationRecorder(settings);
+    animationRecorderRef.current.start();
+    console.log('[AnimationRecorder] Started recording');
+  };
 
-  
-
-  // Accordion open/close state for sidebar sections
-  const [openSections, setOpenSections] = useState<Record<string, boolean>>({
-    main: true,
-    forcePresets: true,
-    forces: false,
-    visuals: false,
-    performance: false,
-    healing: false,
-    collisions: false,
-    colors: true,
-    export: true,
-  });
+  const handleStopAnimationRecording = async () => {
+    if (!animationRecorderRef.current || !animationRecorderRef.current.isActive?.()) return;
+    
+    animationRecorderRef.current.stop();
+    
+    if (!currentImageDataRef.current || !engineRef.current) {
+      console.warn('[AnimationRecorder] Missing context, skipping finalization');
+      return;
+    }
+    
+    // Get image as data URL
+    const canvas = document.createElement('canvas');
+    canvas.width = currentImageDataRef.current.width;
+    canvas.height = currentImageDataRef.current.height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      console.error('[AnimationRecorder] Failed to create canvas context');
+      return;
+    }
+    ctx.putImageData(currentImageDataRef.current, 0, 0);
+    const imageDataUrl = canvas.toDataURL('image/png');
+    
+    // Get recording and store in Zustand for rendering
+    const recording = animationRecorderRef.current.getRecording(
+      imageDataUrl,
+      engineRef.current.canvasWidth || 1024,
+      engineRef.current.canvasHeight || 768,
+      60
+    );
+    
+    // Store recording in Zustand for next step (rendering)
+    setLastAnimationRecording(recording);
+    console.log(`[AnimationRecorder] Recording saved: ${recording.inputs.filter(i => i.pulse).length} pulses, ${(recording.duration / 1000).toFixed(2)}s`);
+  };
 
   const toggleSection = (key: keyof typeof openSections) => {
     setOpenSections(prev => ({ ...prev, [key]: !prev[key] }));
@@ -311,9 +484,9 @@ export function ControlPanel() {
       animate={{ opacity: 1, x: 0 }}
       className="w-full h-full bg-[#0B0B10] text-purple-100 border-l border-purple-500/20 overflow-y-auto"
     >
-      {/* Top action bar */}
-      <div className="sticky top-0 z-10 backdrop-blur supports-[backdrop-filter]:bg-black/40 bg-black/60 border-b border-purple-500/20">
-        <div className="p-3 flex flex-wrap gap-2 text-xs">
+      {/* Top action bar - scrollable */}
+      <div className="border-b border-purple-500/20">
+        <div className="p-3 flex gap-2 text-xs overflow-x-auto whitespace-nowrap pb-4">
           <Button size="sm" className="bg-gradient-to-r from-fuchsia-600/40 to-cyan-500/40 hover:from-fuchsia-600/60 hover:to-cyan-500/60 text-white/90 border border-white/10 flex-shrink-0" onClick={() => fileInputRef.current?.click()}>Upload</Button>
           <Button size="sm" className="bg-indigo-600/30 hover:bg-indigo-600/45 text-indigo-100 border border-indigo-400/20 flex-shrink-0" onClick={async () => {
               const result = await loadDefaultState();
@@ -350,19 +523,18 @@ export function ControlPanel() {
               }
             }}>Default</Button>
           <Button size="sm" className="bg-green-600/30 hover:bg-green-600/45 text-green-100 border border-green-400/20 flex-shrink-0" onClick={handleRefresh}>Refresh</Button>
-          </div>
-          <div className="px-3 pb-3">
-            <Button size="sm" className="w-full bg-blue-600/30 hover:bg-blue-600/45 text-blue-100 border border-blue-400/20" onClick={() => {
-              const imageDataUrl = currentImageDataRef.current 
-                ? imageDataToDataUrl(currentImageDataRef.current)
-                : null;
-              saveDefaultState(imageDataUrl);
-              alert('Default configuration saved!');
-            }}>Save Default</Button>
-          </div>
-        {/* No mode tabs; unified sidebar */}
+          <Button size="sm" className="bg-blue-600/30 hover:bg-blue-600/45 text-blue-100 border border-blue-400/20 flex-shrink-0" onClick={() => {
+            const imageDataUrl = currentImageDataRef.current 
+              ? imageDataToDataUrl(currentImageDataRef.current)
+              : null;
+            saveDefaultState(imageDataUrl);
+            alert('Default configuration saved!');
+          }}>Save Default</Button>
         </div>
+        {/* No mode tabs; unified sidebar */}
+      </div>
 
+      {/* Scrollable content */}
       <div className="p-4 pt-5 pb-6 space-y-4 text-sm">
           <div className="space-y-3">
             <div
@@ -378,43 +550,148 @@ export function ControlPanel() {
             </div>
             {openSections.main && (
             <div className="bg-slate-900/60 border border-slate-700/60 rounded-lg p-3">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-start">
-                <div className="sm:col-span-2">
-                  <label className="block text-xs text-purple-300/80 mb-1">
-                    <span className="inline-flex items-center gap-1">Grid Resolution (Density)
-                      <span title="Number of particles generated from the image. Higher density = more particles and finer detail but heavier on performance."><Info className="w-3.5 h-3.5 opacity-80" /></span>
-                    </span>
-                  </label>
-                  <div className="flex gap-2 items-center">
-                    <Slider
-                      value={[settings.particleDensity]}
-                      onValueChange={handleDensityChange}
-                      max={50000}
-                      min={100}
-                      step={100}
-                      className="flex-1"
-                    />
-                    <input
-                      type="number"
-                      value={settings.particleDensity}
-                      onChange={(e) => {
-                        const newValue = Math.max(100, Math.min(50000, parseInt(e.target.value) || 100));
-                        handleDensityChange([newValue]);
-                      }}
-                      min={100}
-                      max={50000}
-                      step={100}
-                      className="w-20 px-2 py-1 text-sm bg-slate-800 border border-slate-700 rounded text-purple-200 text-center"
-                    />
-                  </div>
-                  <div className="text-xs text-purple-300/70 mt-1">{particleCount} particles</div>
+              {/* Animation Mode Selector - Beautiful Cards */}
+              <div className="mb-4">
+                <label className="block text-xs text-purple-300/80 mb-2">Animation Mode</label>
+                <div className="grid grid-cols-2 gap-2">
+                  {/* Particles Mode Card */}
+                  <button
+                    onClick={() => {
+                      updateSettings({ animationMode: 'particles' });
+                      // Use setTimeout to allow state update to complete before regenerating
+                      setTimeout(() => regenerateParticles(), 0);
+                    }}
+                    className={`relative overflow-hidden rounded-lg border-2 p-3 transition-all duration-300 flex flex-col items-center justify-center gap-2 h-24 ${
+                      settings.animationMode === 'particles'
+                        ? 'border-cyan-400/60 bg-cyan-500/20 shadow-lg shadow-cyan-500/30'
+                        : 'border-slate-600/60 bg-slate-800/40 hover:border-cyan-400/40 hover:bg-slate-800/60'
+                    }`}
+                  >
+                    <div className="text-2xl">●●●</div>
+                    <div className="text-xs font-medium text-center">Particles</div>
+                  </button>
+
+                  {/* Image Crops Mode Card */}
+                  <button
+                    onClick={() => {
+                      updateSettings({ animationMode: 'imageCrops' });
+                      // Use setTimeout to allow state update to complete before regenerating
+                      setTimeout(() => regenerateParticles(), 0);
+                    }}
+                    className={`relative overflow-hidden rounded-lg border-2 p-3 transition-all duration-300 flex flex-col items-center justify-center gap-2 h-24 ${
+                      settings.animationMode === 'imageCrops'
+                        ? 'border-fuchsia-400/60 bg-fuchsia-500/20 shadow-lg shadow-fuchsia-500/30'
+                        : 'border-slate-600/60 bg-slate-800/40 hover:border-fuchsia-400/40 hover:bg-slate-800/60'
+                    }`}
+                  >
+                    <div className="text-2xl">⊞⊞⊞</div>
+                    <div className="text-xs font-medium text-center">Image Crops</div>
+                  </button>
                 </div>
-          <div className="sm:col-span-2">
-                  <label className="block text-xs text-purple-300/80 mb-1">
-                    <span className="inline-flex items-center gap-1">Shape
-                      <span title="Particle drawing shape. Visual only; does not change physics."><Info className="w-3.5 h-3.5 opacity-80" /></span>
-                    </span>
-                  </label>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-start">
+                {/* Particles Mode Controls */}
+                {settings.animationMode === 'particles' && (
+                  <div className="sm:col-span-2">
+                    <label className="block text-xs text-purple-300/80 mb-1">
+                      <span className="inline-flex items-center gap-1">Grid Resolution (Density)
+                        <span title="Number of particles generated from the image. Higher density = more particles and finer detail but heavier on performance."><Info className="w-3.5 h-3.5 opacity-80" /></span>
+                      </span>
+                    </label>
+                    <div className="flex gap-2 items-center">
+                      <Slider
+                        value={[settings.particleDensity]}
+                        onValueChange={handleDensityChange}
+                        max={50000}
+                        min={100}
+                        step={100}
+                        className="flex-1"
+                      />
+                      <input
+                        type="number"
+                        value={settings.particleDensity}
+                        onChange={(e) => {
+                          const newValue = Math.max(100, Math.min(50000, parseInt(e.target.value) || 100));
+                          handleDensityChange([newValue]);
+                        }}
+                        min={100}
+                        max={50000}
+                        step={100}
+                        className="w-20 px-2 py-1 text-sm bg-slate-800 border border-slate-700 rounded text-purple-200 text-center"
+                      />
+                    </div>
+                    <div className="text-xs text-purple-300/70 mt-1">{particleCount} particles</div>
+                  </div>
+                )}
+
+                {/* Image Crops Mode Controls */}
+                {settings.animationMode === 'imageCrops' && (
+                  <>
+                    <div className="sm:col-span-2">
+                      <label className="block text-xs text-purple-300/80 mb-2">
+                        <span className="inline-flex items-center gap-1">Grid Size
+                          <span title="Number of tiles per side (8-64). Total tiles = gridSize × gridSize. Enter value and click ReCalculate."><Info className="w-3.5 h-3.5 opacity-80" /></span>
+                        </span>
+                      </label>
+                      <div className="flex gap-2 items-center">
+                        <input
+                          type="number"
+                          value={gridSizeInput}
+                          onChange={(e) => setGridSizeInput(e.target.value)}
+                          min={8}
+                          max={64}
+                          step={1}
+                          className="flex-1 px-2 py-2 text-sm bg-slate-800 border border-slate-700 rounded text-purple-200"
+                          placeholder="16"
+                        />
+                        <Button
+                          size="sm"
+                          onClick={handleGridSizeRecalculate}
+                          className="h-9 bg-cyan-600/50 hover:bg-cyan-600/70 text-cyan-100 border border-cyan-400/30 whitespace-nowrap"
+                        >
+                          ReCalculate
+                        </Button>
+                      </div>
+                      <div className="text-xs text-purple-300/70 mt-2">
+                        {(() => {
+                          const gridSize = Math.max(8, Math.min(64, parseInt(gridSizeInput) || 16));
+                          return `${gridSize}×${gridSize} grid = ${gridSize * gridSize} tiles`;
+                        })()}
+                      </div>
+                    </div>
+
+                    <div className="sm:col-span-2 space-y-2">
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          id="tileRotationOnScatter"
+                          checked={settings.tileRotationOnScatter ?? true}
+                          onChange={(e) => updateSettings({ tileRotationOnScatter: e.target.checked })}
+                          className="w-4 h-4"
+                        />
+                        <label htmlFor="tileRotationOnScatter" className="text-xs text-purple-200">
+                          Rotate tiles when scattered
+                        </label>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          id="tileGlowOnScatter"
+                          checked={settings.tileGlowOnScatter ?? false}
+                          onChange={(e) => updateSettings({ tileGlowOnScatter: e.target.checked })}
+                          className="w-4 h-4"
+                        />
+                        <label htmlFor="tileGlowOnScatter" className="text-xs text-purple-200">
+                          Glow tiles when scattered
+                        </label>
+                      </div>
+                    </div>
+                  </>
+                )}
+
+                <div className="sm:col-span-2">
+                  <label className="block text-xs text-purple-300/80 mb-1">Shape</label>
                   <Select value={settings.particleShape} onValueChange={(v: 'circle'|'square'|'triangle')=>updateSettings({ particleShape: v })}>
                     <SelectTrigger className="w-full h-8 bg-slate-800 border-slate-700 text-purple-200">
                 <SelectValue />
@@ -737,7 +1014,7 @@ export function ControlPanel() {
                           if (preset !== 'custom') {
                             setCustomWidth(w); setCustomHeight(h);
                             setDesiredCanvasSize({ width: w, height: h });
-                            regenerateParticles(undefined, { width: w, height: h });
+                            regenerateParticles(undefined, undefined, { width: w, height: h });
                           }
                         }}
                       >
@@ -777,7 +1054,7 @@ export function ControlPanel() {
                         onClick={()=>{
                           if (canvasPreset === 'custom') {
                             setDesiredCanvasSize({ width: customWidth, height: customHeight });
-                            regenerateParticles(undefined, { width: customWidth, height: customHeight });
+                            regenerateParticles(undefined, undefined, { width: customWidth, height: customHeight });
                           }
                         }}
                       >Apply</Button>
@@ -805,25 +1082,6 @@ export function ControlPanel() {
                     className="w-full"
                   />
                 </div>
-                <div className="sm:col-span-2">
-                  <div className="flex items-center justify-between mb-1">
-                    <label className="text-xs text-purple-300/80 inline-flex items-center gap-1">Restoration Force
-                      <span title="Strength of spring-like force that pulls particles back to their original positions. Higher = faster return, potentially snappier motion."><Info className="w-3.5 h-3.5 opacity-80" /></span>
-                    </label>
-                    <div className="text-[11px] text-purple-400">{settings.restorationForce.toFixed(2)} (0..500)</div>
-                  </div>
-                  <Slider value={[settings.restorationForce]} onValueChange={([v])=>updateSettings({ restorationForce: v })} max={500} min={0} step={0.01} className="w-full" />
-                </div>
-                {/* Moved Viscosity here from Forces section */}
-                <div className="sm:col-span-2">
-                  <div className="flex items-center justify-between mb-1">
-                    <label className="text-xs text-purple-300/80 inline-flex items-center gap-1">Viscosity
-                      <span title="Damping applied to particle velocity. Higher = more resistance (slower, smoother stop). Lower = more lively motion."><Info className="w-3.5 h-3.5 opacity-80" /></span>
-                    </label>
-                    <div className="text-[11px] text-purple-400">{settings.healingFactor} (0..100)</div>
-                  </div>
-                  <Slider value={[settings.healingFactor]} onValueChange={([v])=>updateSettings({ healingFactor: v })} max={100} min={0} step={1} className="w-full" />
-                </div>
                 <div className="col-span-2">
                   <Button variant={settings.wallsEnabled? 'default':'outline'} onClick={toggleWalls} className={`w-full h-8 ${settings.wallsEnabled? 'bg-green-600/20 hover:bg-green-600/30 text-green-200':'border-red-500/40 text-red-300 hover:bg-red-500/10'}`}>{settings.wallsEnabled? 'Walls ON':'Walls OFF'}</Button>
                 </div>
@@ -836,7 +1094,7 @@ export function ControlPanel() {
               className="flex items-center justify-between py-1 cursor-pointer mt-2"
               onClick={() => toggleSection('forcePresets')}
             >
-              <h4 className="text-xs uppercase tracking-wider text-purple-300/70">Force Impact</h4>
+              <h4 className="text-xs uppercase tracking-wider text-purple-300/70">Force Animate</h4>
               {openSections.forcePresets ? (
                 <ChevronDown className="w-4 h-4 text-purple-300" />
               ) : (
@@ -864,6 +1122,7 @@ export function ControlPanel() {
                     easeIn: easeIn,
                     easeOut: easeOut,
                     easeType: easeType,
+                    mode: forceMode,
                   };
                   // Direction-based types
                   if (['gravity','wind','crosswind','gravityFlip','waveLeft','waveUp'].includes(pulseSelected)) {
@@ -907,11 +1166,56 @@ export function ControlPanel() {
                     base.scatterDurationPercent = randomizeScatterDurationPercent;
                     base.returnDurationPercent = randomizeReturnDurationPercent;
                   }
-                  enqueuePulse(base);
+                  // Update store so canvas button has access to current config
+                  updatePulseConfig(base);
+                  
+                  // Handle continuous mode
+                  if (forceMode === 'continuous') {
+                    const { continuousForcePulseId, setContinuousForcePulse } = useForceFieldStore.getState();
+                    
+                    // Toggle continuous force on/off
+                    if (continuousForcePulseId) {
+                      // Stop continuous force
+                      setContinuousForcePulse(null);
+                    } else {
+                      // Start continuous force - generate a unique ID for this pulse
+                      const pulseId = `continuous-${Date.now()}`;
+                      setContinuousForcePulse(pulseId);
+                      base.id = pulseId;
+                      enqueuePulse(base);
+                    }
+                  } else {
+                    // Impulse mode - fire once
+                    enqueuePulse(base);
+                  }
+                  
+                  // Record pulse for deterministic replay if recording is active
+                  if (animationRecorderRef.current?.isActive?.()) {
+                    animationRecorderRef.current.recordPulse(base);
+                  }
                 };
-
                 return (
                   <>
+                    {/* Force Mode Selector */}
+                    <div className="mb-3 flex gap-2">
+                      <Button
+                        size="sm"
+                        onClick={() => setForceMode('impulse')}
+                        variant="outline"
+                        className={`flex-1 h-7 text-xs ${forceMode === 'impulse' ? 'bg-purple-600/40 border-purple-400/60 text-purple-100' : 'border-slate-600 text-slate-300 hover:bg-slate-800/50'}`}
+                      >
+                        💥 Impulse
+                      </Button>
+                      <Button
+                        size="sm"
+                        onClick={() => setForceMode('continuous')}
+                        variant="outline"
+                        className={`flex-1 h-7 text-xs ${forceMode === 'continuous' ? 'bg-cyan-600/40 border-cyan-400/60 text-cyan-100' : 'border-slate-600 text-slate-300 hover:bg-slate-800/50'}`}
+                      >
+                        ⚡ Continuous
+                      </Button>
+                    </div>
+
                     {/* Preset selector and button */}
                     <div className="mb-3 space-y-2">
                       <Select value={pulseSelected} onValueChange={(v: any) => setPulseSelected(v)}>
@@ -924,7 +1228,9 @@ export function ControlPanel() {
                           ))}
                         </SelectContent>
                       </Select>
-                      <Button onClick={onImpact} className="w-full h-8 bg-purple-600/40 hover:bg-purple-600/60">Impact!</Button>
+                      <Button onClick={onImpact} className={`w-full h-8 font-semibold ${forceMode === 'continuous' ? 'bg-cyan-600/50 hover:bg-cyan-600/70' : 'bg-purple-600/40 hover:bg-purple-600/60'}`}>
+                        {forceMode === 'continuous' ? `${continuousForcePulseId ? '⏹ Stop' : '▶ Start'} Continuous` : 'Animate'}
+                      </Button>
                     </div>
 
                     {/* Timing & Easing Section */}
@@ -1193,6 +1499,7 @@ export function ControlPanel() {
                     className={`w-full ${isRecording ? 'bg-red-600/70 hover:bg-red-600/80' : 'bg-green-600/70 hover:bg-green-600/80'} h-8 px-3 flex items-center justify-center gap-2`}
                     onClick={() => {
                       if (!isRecording) {
+                        // Start both video and animation recording
                         const { preset, width, height } = exportSettings;
                         let w = width, h = height;
                         if (preset !== 'custom') {
@@ -1202,9 +1509,15 @@ export function ControlPanel() {
                           if (preset === 'original') { const img = currentImageDataRef.current; if (img) { w = img.width; h = img.height; } }
                         }
                         setDesiredCanvasSize({ width: w, height: h });
+                        // Start animation recording first
+                        handleStartAnimationRecording();
+                        // Then start video recording
                         startRecording();
                       } else {
+                        // Stop both video and animation recording
                         stopRecording();
+                        // Stop animation recording after video stops
+                        setTimeout(() => handleStopAnimationRecording(), 100);
                       }
                     }}
                   >
@@ -1246,69 +1559,6 @@ export function ControlPanel() {
                           }}
                         >
                           Download WebM
-                        </Button>
-                        <Button
-                          size="sm"
-                          className="bg-purple-600/30 hover:bg-purple-600/45 text-purple-100 border border-purple-400/20 disabled:opacity-50 h-8"
-                          disabled={conversionProgress !== null}
-                          onClick={async () => {
-                            // Check server availability when button is clicked
-                            const serverReady = await checkServerHealth();
-                            setServerAvailable(serverReady);
-                            
-                            if (!serverReady) {
-                              alert('Interpolation server is not available.\n\nTo start the server:\n\n1. Open a terminal\n2. Navigate to the project directory\n3. Run: npm run start-interpolate-server\n\nMake sure FFmpeg is installed on your system.');
-                              return;
-                            }
-                            
-                            if (!recordingUrl) {
-                              alert('No recording available. Record an animation first.');
-                              return;
-                            }
-
-                            try {
-                              // Convert data URL to blob
-                              console.log('[ControlPanel] Starting smooth video process...');
-                              const response = await fetch(recordingUrl);
-                              const videoBlob = await response.blob();
-                              console.log('[ControlPanel] Video blob ready:', { size: videoBlob.size, type: videoBlob.type });
-
-                              // Perform interpolation
-                              setConversionProgress(0);
-                              console.log('[ControlPanel] Calling interpolateVideo...');
-                              const smoothedBlob = await interpolateVideo(videoBlob, {
-                                onProgress: (progress, message) => {
-                                  console.log('[ControlPanel] Progress update:', { progress, message });
-                                  // Progress is already 0-100, don't multiply by 100 again
-                                  setConversionProgress(Math.round(progress));
-                                }
-                              });
-
-                              console.log('[ControlPanel] Interpolation complete, downloading...', { size: smoothedBlob.size });
-                              // Download the smoothed video
-                              downloadBlob(smoothedBlob, `forcefield-smooth-${Date.now()}.webm`);
-                              setConversionProgress(null);
-                              
-                              console.log('[ControlPanel] Video smoothing complete');
-                            } catch (error) {
-                              setConversionProgress(null);
-                              const errorMsg = error instanceof Error ? error.message : 'Unknown error';
-                              console.error('[ControlPanel] Smoothing error:', error);
-                              alert(`Failed to smooth video: ${errorMsg}`);
-                            }
-                          }}
-                        >
-                          {conversionProgress !== null ? (
-                            <>
-                              <Loader2 className="w-3 h-3 mr-1 animate-spin" />
-                              {conversionProgress}%
-                            </>
-                          ) : (
-                            <>
-                              <HelpCircle className="w-3 h-3 mr-1" />
-                              Smooth Video
-                            </>
-                          )}
                         </Button>
                       </div>
                     </div>
@@ -1414,66 +1664,250 @@ export function ControlPanel() {
 
             <div
               className="flex items-center justify-between py-1 cursor-pointer mt-2"
-              onClick={() => toggleSection('healing')}
+              onClick={() => toggleSection('particleInteractions')}
             >
-              <h4 className="text-xs uppercase tracking-wider text-purple-300/70">Healing</h4>
-              {openSections.healing ? (
+              <h4 className="text-xs uppercase tracking-wider text-purple-300/70">Particle Interactions</h4>
+              {openSections.particleInteractions ? (
                 <ChevronDown className="w-4 h-4 text-purple-300" />
               ) : (
                 <ChevronRight className="w-4 h-4 text-purple-300" />)
               }
             </div>
-            {openSections.healing && (
+            {openSections.particleInteractions && (
             <div className="bg-slate-900/60 border border-slate-700/60 rounded-lg p-3">
-              <div className="space-y-3">
-                <div className="flex items-center gap-2 h-8">
-                  <input id="partialHealingEnabled" type="checkbox" checked={currentPartialHealing.enabled} onChange={(e)=>updateSettings({ partialHealing: { ...currentPartialHealing, enabled: e.target.checked } })} />
-                  <label htmlFor="partialHealingEnabled" className="text-xs text-purple-200">Enable</label>
-                </div>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                    <label className="flex items-end h-10 text-xs text-purple-300/80 mb-1">Fast-Healing Fraction</label>
-                    <input type="number" step={0.05} value={currentPartialHealing.fastFraction} min={0} max={1} onChange={(e)=>updateSettings({ partialHealing: { ...currentPartialHealing, fastFraction: Number(e.target.value) } })} className="w-full h-8 px-2 bg-slate-800 border border-slate-700 rounded text-purple-200 text-xs" />
-                </div>
-          <div>
-                    <label className="flex items-end h-10 text-xs text-purple-300/80 mb-1">Speed Multiplier</label>
-                    <input type="number" step={0.1} value={currentPartialHealing.speedMultiplier} min={1} max={10} onChange={(e)=>updateSettings({ partialHealing: { ...currentPartialHealing, speedMultiplier: Number(e.target.value) } })} className="w-full h-8 px-2 bg-slate-800 border border-slate-700 rounded text-purple-200 text-xs" />
+              <div className="space-y-4">
+                {/* ─── QUICK PRESETS (At top) ─── */}
+                <div className="pb-3 border-b border-slate-700/50">
+                  <label className="text-xs text-purple-300/70 font-semibold mb-2 block">⚡ Quick Presets</label>
+                  <div className="grid grid-cols-3 gap-2 text-xs">
+                    <Button
+                      size="sm"
+                      onClick={() => applyInteractionPreset('liquid')}
+                      variant="outline"
+                      className="border-blue-500/40 text-blue-300 hover:bg-blue-500/10 h-7 text-xs"
+                    >
+                      💧 Liquid
+                    </Button>
+                    <Button
+                      size="sm"
+                      onClick={() => applyInteractionPreset('fluid')}
+                      variant="outline"
+                      className="border-cyan-500/40 text-cyan-300 hover:bg-cyan-500/10 h-7 text-xs"
+                    >
+                      🌊 Fluid
+                    </Button>
+                    <Button
+                      size="sm"
+                      onClick={() => applyInteractionPreset('elastic')}
+                      variant="outline"
+                      className="border-purple-500/40 text-purple-300 hover:bg-purple-500/10 h-7 text-xs"
+                    >
+                      🎈 Elastic
+                    </Button>
+                    <Button
+                      size="sm"
+                      onClick={() => applyInteractionPreset('bouncy')}
+                      variant="outline"
+                      className="border-yellow-500/40 text-yellow-300 hover:bg-yellow-500/10 h-7 text-xs"
+                    >
+                      ⚪ Bouncy
+                    </Button>
+                    <Button
+                      size="sm"
+                      onClick={() => applyInteractionPreset('sticky')}
+                      variant="outline"
+                      className="border-amber-500/40 text-amber-300 hover:bg-amber-500/10 h-7 text-xs"
+                    >
+                      🍯 Sticky
+                    </Button>
+                    <Button
+                      size="sm"
+                      onClick={() => applyInteractionPreset('rigid')}
+                      variant="outline"
+                      className="border-red-500/40 text-red-300 hover:bg-red-500/10 h-7 text-xs"
+                    >
+                      🪨 Rigid
+                    </Button>
+                    <Button
+                      size="sm"
+                      onClick={() => applyInteractionPreset('floaty')}
+                      variant="outline"
+                      className="border-pink-500/40 text-pink-300 hover:bg-pink-500/10 h-7 text-xs"
+                    >
+                      🎆 Floaty
+                    </Button>
+                    <Button
+                      size="sm"
+                      onClick={() => applyInteractionPreset('solid')}
+                      variant="outline"
+                      className="border-slate-500/40 text-slate-300 hover:bg-slate-500/10 h-7 text-xs"
+                    >
+                      ⬜ Solid
+                    </Button>
                   </div>
                 </div>
-              </div>
-            </div>
-            )}
 
-            <div
-              className="flex items-center justify-between py-1 cursor-pointer mt-2"
-              onClick={() => toggleSection('collisions')}
-            >
-              <h4 className="text-xs uppercase tracking-wider text-purple-300/70">Collisions</h4>
-              {openSections.collisions ? (
-                <ChevronDown className="w-4 h-4 text-purple-300" />
-              ) : (
-                <ChevronRight className="w-4 h-4 text-purple-300" />)
-              }
-            </div>
-            {openSections.collisions && (
-            <div className="bg-slate-900/60 border border-slate-700/60 rounded-lg p-3">
-              <div className="space-y-3">
-                <div className="flex items-center gap-2 h-8">
-                  <input id="collisionsEnabled" type="checkbox" checked={currentCollisions.enabled} onChange={(e)=>updateSettings({ collisions: { ...currentCollisions, enabled: e.target.checked } })} />
-                  <label htmlFor="collisionsEnabled" className="text-xs text-purple-200">Enable</label>
-                </div>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                    <label className="flex items-end h-10 text-xs text-purple-300/80 mb-1">Separation Strength</label>
-                    <input type="number" step={0.1} value={currentCollisions.strength} min={0.1} max={2} onChange={(e)=>updateSettings({ collisions: { ...currentCollisions, strength: Number(e.target.value) } })} className="w-full h-8 px-2 bg-slate-800 border border-slate-700 rounded text-purple-200 text-xs" />
-                </div>
-                <div>
-                    <label className="flex items-end h-10 text-xs text-purple-300/80 mb-1">Radius Multiplier</label>
-                    <input type="number" step={0.05} value={currentCollisions.radiusMultiplier} min={1} max={2} onChange={(e)=>updateSettings({ collisions: { ...currentCollisions, radiusMultiplier: Number(e.target.value) } })} className="w-full h-8 px-2 bg-slate-800 border border-slate-700 rounded text-purple-200 text-xs" />
+                {/* ─── RESTORATION & VISCOSITY (Animation Behavior) ─── */}
+                <div className="pb-3 border-b border-slate-700/50">
+                  <p className="text-xs text-purple-300/70 font-semibold mb-2">🎯 Animation Behavior</p>
+                  
+                  {/* Restoration Force */}
+                  <div className="mb-3">
+                    <label className="flex items-center justify-between text-xs text-purple-300/80 mb-2">
+                      <span>Restoration Force <span className="text-purple-400/60 text-[10px]">(Weak ← → Strong)</span></span>
+                      <span className="text-purple-400">{settings.restorationForce.toFixed(0)}</span>
+                    </label>
+                    <Slider
+                      value={[settings.restorationForce]}
+                      onValueChange={(val) => updateSettings({ restorationForce: val[0] })}
+                      min={0}
+                      max={500}
+                      step={1}
+                      className="w-full"
+                    />
+                    <p className="text-[10px] text-purple-400/60 mt-1">Spring-like force that pulls particles back to original positions</p>
+                  </div>
+
+                  {/* Motion Resistance (Friction) - Applied every frame */}
+                  <div className="mb-3">
+                    <label className="flex items-center justify-between text-xs text-purple-300/80 mb-2">
+                      <span>Motion Resistance <span className="text-purple-400/60 text-[10px]">(Floaty ← → Sticky)</span></span>
+                      <span className="text-purple-400">{currentInteraction.friction.toFixed(2)}</span>
+                    </label>
+                    <Slider
+                      value={[currentInteraction.friction]}
+                      onValueChange={(val) => updateSettings({ particleInteraction: { ...currentInteraction, friction: val[0] } })}
+                      min={0}
+                      max={1}
+                      step={0.05}
+                      className="w-full"
+                    />
+                    <p className="text-[10px] text-purple-400/60 mt-1">Air resistance - higher = slower movement through medium</p>
                   </div>
                 </div>
+
+                {/* ─── COLLISION ENABLE/DISABLE (Always visible) ─── */}
+                <div className="pb-3 border-b border-slate-700/50">
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="flex items-center gap-2 h-8">
+                      <input id="collisionsEnabled" type="checkbox" checked={currentCollisions.enabled} onChange={(e)=>updateSettings({ collisions: { ...currentCollisions, enabled: e.target.checked } })} className="w-4 h-4" />
+                      <label htmlFor="collisionsEnabled" className="text-xs text-purple-200 font-semibold">💥 Collision Physics</label>
+                    </div>
+                    <span className="text-xs text-purple-400/60">{currentCollisions.enabled ? '✓ Active' : '○ Disabled'}</span>
+                  </div>
+                  <p className="text-[10px] text-purple-400/60">When disabled: particles ignore each other. When enabled: particles push apart and interact.</p>
+                </div>
+
+                {/* ─── COLLISION CONTROLS (Only shown when enabled) ─── */}
+                {currentCollisions.enabled && (
+                  <div className="pb-3 border-b border-slate-700/50">
+                    {/* Separation Strength */}
+                    <div className="mb-3">
+                      <label className="flex items-center justify-between text-xs text-purple-300/80 mb-2">
+                        <span>Separation Strength <span className="text-purple-400/60 text-[10px]">(Soft ← → Hard)</span></span>
+                        <span className="text-purple-400">{currentCollisions.strength.toFixed(1)}</span>
+                      </label>
+                      <Slider
+                        value={[currentCollisions.strength]}
+                        onValueChange={(val) => updateSettings({ collisions: { ...currentCollisions, strength: val[0] } })}
+                        min={0.1}
+                        max={2}
+                        step={0.1}
+                        className="w-full"
+                      />
+                      <p className="text-[10px] text-purple-400/60 mt-1">Force to prevent particles from overlapping</p>
+                    </div>
+
+                    {/* Radius Multiplier */}
+                    <div>
+                      <label className="flex items-center justify-between text-xs text-purple-300/80 mb-2">
+                        <span>Collision Radius <span className="text-purple-400/60 text-[10px]">(Small ← → Large)</span></span>
+                        <span className="text-purple-400">{currentCollisions.radiusMultiplier.toFixed(2)}</span>
+                      </label>
+                      <Slider
+                        value={[currentCollisions.radiusMultiplier]}
+                        onValueChange={(val) => updateSettings({ collisions: { ...currentCollisions, radiusMultiplier: val[0] } })}
+                        min={1}
+                        max={2}
+                        step={0.05}
+                        className="w-full"
+                      />
+                      <p className="text-[10px] text-purple-400/60 mt-1">Effective collision size relative to particle radius</p>
+                    </div>
+                  </div>
+                )}
+
+                {/* ─── PARTICLE INTERACTION PROPERTIES (Only shown when collisions enabled) ─── */}
+                {currentCollisions.enabled && (
+                <div className="pb-3 border-b border-slate-700/50">
+                  <p className="text-xs text-purple-300/70 font-semibold mb-2">🔗 Interaction Properties</p>
+                  
+                  {/* Elasticity */}
+                  <div className="mb-3">
+                    <label className="flex items-center justify-between text-xs text-purple-300/80 mb-2">
+                      <span>Elasticity <span className="text-purple-400/60 text-[10px]">(Sand ← → Billiards)</span></span>
+                      <span className="text-purple-400">{currentInteraction.elasticity.toFixed(2)}</span>
+                    </label>
+                    <Slider
+                      value={[currentInteraction.elasticity]}
+                      onValueChange={(val) => updateSettings({ particleInteraction: { ...currentInteraction, elasticity: val[0] } })}
+                      min={0}
+                      max={1}
+                      step={0.05}
+                      className="w-full"
+                    />
+                    <p className="text-[10px] text-purple-400/60 mt-1">Bounciness - how much energy is retained in collisions</p>
+                  </div>
+
+                  {/* Collision Strength */}
+                  <div className="mb-3">
+                    <label className="flex items-center justify-between text-xs text-purple-300/80 mb-2">
+                      <span>Collision Strength <span className="text-purple-400/60 text-[10px]">(Weak ← → Strong)</span></span>
+                      <span className="text-purple-400">{currentInteraction.collisionStrength.toFixed(2)}</span>
+                    </label>
+                    <Slider
+                      value={[currentInteraction.collisionStrength]}
+                      onValueChange={(val) => updateSettings({ particleInteraction: { ...currentInteraction, collisionStrength: val[0] } })}
+                      min={0}
+                      max={1}
+                      step={0.05}
+                      className="w-full"
+                    />
+                    <p className="text-[10px] text-purple-400/60 mt-1">Repulsion force strength during particle interaction</p>
+                  </div>
+                </div>
+                )}
+
+                {/* ─── TILE-SPECIFIC BEHAVIOR ─── */}
+                {settings.generateMode === 'imageTiles' && (
+                  <div className="pb-3 border-b border-slate-700/50">
+                    <p className="text-xs text-purple-300/70 font-semibold mb-2">🎨 Tile Behavior</p>
+                    <div className="space-y-2">
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          id="tileRotationOnScatter"
+                          checked={settings.tileRotationOnScatter ?? true}
+                          onChange={(e) => updateSettings({ tileRotationOnScatter: e.target.checked })}
+                          className="w-4 h-4"
+                        />
+                        <label htmlFor="tileRotationOnScatter" className="text-xs text-purple-200">Rotate tiles when scattered</label>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          id="tileGlowOnScatter"
+                          checked={settings.tileGlowOnScatter ?? false}
+                          onChange={(e) => updateSettings({ tileGlowOnScatter: e.target.checked })}
+                          className="w-4 h-4"
+                        />
+                        <label htmlFor="tileGlowOnScatter" className="text-xs text-purple-200">Glow tiles when scattered</label>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
               </div>
-              <div className="text-xs text-purple-400 mt-2">Note: CPU collisions are more expensive; use with lower density or enable Adaptive Mode.</div>
             </div>
             )}
 
@@ -1517,7 +1951,7 @@ export function ControlPanel() {
                 <ColorFilter />
               </div>
             )}
-            <h4 className="text-xs uppercase tracking-wider text-purple-300/70 mb-1">Force Impact</h4>
+            <h4 className="text-xs uppercase tracking-wider text-purple-300/70 mb-1">Animation</h4>
             <div className="bg-slate-900/60 border border-slate-700/60 rounded-lg p-3">
               {(() => {
                 const presetLabels: Record<ForcePulseType, string> = {
@@ -1598,7 +2032,7 @@ export function ControlPanel() {
                         </SelectContent>
                       </Select>
                     </div>
-                    <Button onClick={onImpact} className="w-full h-8 bg-purple-600/40 hover:bg-purple-600/60">Impact!</Button>
+                    <Button onClick={onImpact} className="w-full h-8 bg-purple-600/40 hover:bg-purple-600/60">Animate</Button>
                     <div className="mt-3 grid grid-cols-2 gap-2">
                       <div>
                         <label className="block text-[11px] text-purple-300/80 mb-1">Duration (ms)</label>

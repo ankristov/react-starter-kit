@@ -4,6 +4,7 @@ import { ParticleEngine } from '../lib/particleEngine';
 import { createDefaultImage } from '../lib/imageUtils';
 import { useFps } from '../hooks/useFps';
 import { eventRecorder } from '../lib/eventRecorder';
+import { Button } from './ui/button';
 
 export function ForceFieldCanvas() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -39,6 +40,9 @@ export function ForceFieldCanvas() {
     setRecordingMimeType,
     setDesiredCanvasSize,
     setRecorderControl,
+    currentPulseConfig,
+    enqueuePulse,
+    continuousForcePulseId,
   } = useForceFieldStore();
 
   // Initialize particle engine (run once)
@@ -651,6 +655,69 @@ export function ForceFieldCanvas() {
             <span className="opacity-80">vis: {(settings.performance.visibleFraction ?? 1).toFixed(2)}</span>
           )}
         </div>
+      </div>
+
+      {/* Compact Animate & Record buttons in bottom-right corner */}
+      <div className="absolute bottom-4 right-4 flex gap-2">
+        <Button
+          size="sm"
+          className={`w-10 h-10 p-0 flex items-center justify-center rounded border ${
+            currentPulseConfig?.mode === 'continuous' && continuousForcePulseId
+              ? 'bg-cyan-600/70 hover:bg-cyan-600/80 text-cyan-100 border-cyan-400/30'
+              : 'bg-purple-600/50 hover:bg-purple-600/70 text-purple-100 border-purple-400/30'
+          }`}
+          title={currentPulseConfig?.mode === 'continuous' ? (continuousForcePulseId ? 'Stop Continuous Force' : 'Start Continuous Force') : 'Animate (trigger current force pulse)'}
+          onClick={() => {
+            const state = useForceFieldStore.getState();
+            const { continuousForcePulseId, setContinuousForcePulse } = state;
+            
+            // Handle continuous mode
+            if (currentPulseConfig?.mode === 'continuous') {
+              if (continuousForcePulseId) {
+                // Stop continuous force
+                setContinuousForcePulse(null);
+              } else {
+                // Start continuous force
+                const pulseId = `continuous-${Date.now()}`;
+                setContinuousForcePulse(pulseId);
+                const pulse = { ...currentPulseConfig, id: pulseId };
+                enqueuePulse(pulse);
+              }
+            } else {
+              // Impulse mode
+              enqueuePulse(currentPulseConfig);
+            }
+          }}
+        >
+          {currentPulseConfig?.mode === 'continuous' ? (continuousForcePulseId ? '⏹' : '▶') : '✨'}
+        </Button>
+        <Button
+          size="sm"
+          className={`w-10 h-10 p-0 flex items-center justify-center rounded border ${ 
+            isRecording
+              ? 'bg-red-600/70 hover:bg-red-600/80 text-red-100 border-red-400/30'
+              : 'bg-green-600/70 hover:bg-green-600/80 text-green-100 border-green-400/30'
+          }`}
+          title={isRecording ? 'Stop Recording' : 'Start Recording'}
+          onClick={() => {
+            if (!isRecording) {
+              const { preset, width, height } = exportSettings;
+              let w = width, h = height;
+              if (preset !== 'custom') {
+                if (preset === 'instagramReel') { w = 1080; h = 1920; }
+                if (preset === 'youtube') { w = 1920; h = 1080; }
+                if (preset === 'square') { w = 1080; h = 1080; }
+                const img = useForceFieldStore.getState().particles?.[0];
+              }
+              setDesiredCanvasSize({ width: w, height: h });
+              useForceFieldStore.getState().startRecording();
+            } else {
+              useForceFieldStore.getState().stopRecording();
+            }
+          }}
+        >
+          <span className={isRecording ? '🔴' : '⚫'} />
+        </Button>
       </div>
     </div>
   );

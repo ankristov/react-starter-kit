@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import type { Particle, ForceFieldSettings, MousePosition, ControlPanelSettings, ColorInfo, ColorGroup, ForcePulse, ForcePulseType, ExportSettings, BackgroundImageSettings } from '../types/particle';
+import type { AnimationRecording } from '../lib/deterministicRender';
 
 interface ForceFieldState {
   particles: Particle[];
@@ -13,10 +14,12 @@ interface ForceFieldState {
   isRecording: boolean;
   recordingUrl: string | null;
   recordingMimeType: string | null; // Store the actual MIME type used for recording
+  lastAnimationRecording: AnimationRecording | null; // Store the last recorded animation for rendering
   setExportSettings: (s: Partial<ExportSettings>) => void;
   setIsRecording: (b: boolean) => void;
   setRecordingUrl: (url: string | null) => void;
   setRecordingMimeType: (mime: string | null) => void;
+  setLastAnimationRecording: (recording: AnimationRecording | null) => void;
   // Recorder control wiring (canvas registers callbacks)
   setRecorderControl: (ctrl: { start: () => void; stop: () => void; getRecordedStates?: () => any } | null) => void;
   startRecording: () => void;
@@ -24,6 +27,12 @@ interface ForceFieldState {
   colorAnalysis: ColorInfo[]; // Add color analysis data
   colorGroups: ColorGroup[]; // Add color groups data
   currentFileHash: string | null; // Add current file hash for file-specific settings
+  // Pulse configuration (shared between sidebar and canvas button)
+  currentPulseConfig: any; // Stores current force pulse configuration
+  updatePulseConfig: (config: Partial<any>) => void; // Update pulse configuration
+  // Continuous force state
+  continuousForcePulseId: string | null; // ID of active continuous force (null if no continuous force)
+  setContinuousForcePulse: (pulseId: string | null) => void; // Start/stop continuous force
   // Presets
   presetNames: string[];
   selectedPreset: string | null;
@@ -92,6 +101,11 @@ const defaultSettings: ForceFieldSettings = {
     strength: 0.8,
     radiusMultiplier: 1.2,
   },
+  particleInteraction: {
+    elasticity: 0.5,      // medium: balanced bounce (billiard=1, sand=0)
+    collisionStrength: 0.8, // strong particle separation
+    friction: 0.5,         // medium friction: balanced movement
+  },
   performance: {
     adaptiveEnabled: false,
     targetFps: 60,
@@ -110,6 +124,11 @@ const defaultSettings: ForceFieldSettings = {
     filterMode: 'show',
     colorTolerance: 10, // Number of color clusters to create (1-20)
   },
+  // Animation mode defaults
+  animationMode: 'particles',
+  imageCropGridSize: 16,
+  tileRotationOnScatter: true,
+  tileGlowOnScatter: false,
 };
 
 // Default state storage helpers
@@ -172,6 +191,7 @@ const loadPresets = (fileHash?: string): Record<string, ControlPanelSettings> =>
         partialHealing: defaultSettings.partialHealing,
         visual: defaultSettings.visual,
         collisions: defaultSettings.collisions,
+        particleInteraction: defaultSettings.particleInteraction,
       } as ControlPanelSettings;
     }
     return parsed;
@@ -273,6 +293,7 @@ const saveControlSettings = (settings: ForceFieldSettings, fileHash?: string) =>
       partialHealing: settings.partialHealing,
       visual: settings.visual,
       collisions: settings.collisions,
+      particleInteraction: settings.particleInteraction,
     };
 
     const key = fileHash ? `forcefield-controls-${fileHash}` : 'forcefield-controls';
@@ -303,6 +324,7 @@ const saveControlSettings = (settings: ForceFieldSettings, fileHash?: string) =>
       partialHealing: settings.partialHealing,
       visual: settings.visual,
       collisions: settings.collisions,
+      particleInteraction: settings.particleInteraction,
       };
       localStorage.setItem(key, JSON.stringify(controlSettings));
     } catch (retryError) {
@@ -325,6 +347,7 @@ export const useForceFieldStore = create<ForceFieldState>((set, get) => ({
   isRecording: false,
   recordingUrl: null,
   recordingMimeType: null,
+  lastAnimationRecording: null,
   setExportSettings: (s) => {
     const newExportSettings = { ...get().exportSettings, ...s };
     set({ exportSettings: newExportSettings });
@@ -333,6 +356,7 @@ export const useForceFieldStore = create<ForceFieldState>((set, get) => ({
   setIsRecording: (b) => set({ isRecording: b }),
   setRecordingUrl: (url) => set({ recordingUrl: url }),
   setRecordingMimeType: (mime) => set({ recordingMimeType: mime }),
+  setLastAnimationRecording: (recording) => set({ lastAnimationRecording: recording }),
   // recorder control storage (not persisted)
   _recorderControl: undefined as any,
   setRecorderControl: (ctrl) => { (get() as any)._recorderControl = ctrl; },
@@ -341,6 +365,26 @@ export const useForceFieldStore = create<ForceFieldState>((set, get) => ({
   colorAnalysis: [], // Initialize empty color analysis
   colorGroups: [], // Initialize empty color groups
   currentFileHash: null, // Initialize current file hash
+  // Pulse configuration (shared with canvas button)
+  currentPulseConfig: {
+    type: 'burst',
+    durationMs: 1500,
+    holdTimeMs: 0,
+    strength: 30,
+    easeIn: 0.2,
+    easeOut: 0.2,
+    easeType: 'ease-in-out-quad',
+    origin: { normalized: true, x: 0.5, y: 0.5 },
+    radius: 1500,
+  },
+  updatePulseConfig: (config) => {
+    set({ currentPulseConfig: { ...get().currentPulseConfig, ...config } });
+  },
+  // Continuous force state
+  continuousForcePulseId: null,
+  setContinuousForcePulse: (pulseId: string | null) => {
+    set({ continuousForcePulseId: pulseId });
+  },
   presetNames: Object.keys(loadPresets()),
   selectedPreset: 'Default',
 
@@ -479,6 +523,7 @@ export const useForceFieldStore = create<ForceFieldState>((set, get) => ({
       partialHealing: state.settings.partialHealing,
       visual: state.settings.visual,
       collisions: state.settings.collisions,
+      particleInteraction: state.settings.particleInteraction,
     };
     const fileHash = state.currentFileHash || undefined;
     const presets = loadPresets(fileHash);
@@ -531,6 +576,7 @@ export const useForceFieldStore = create<ForceFieldState>((set, get) => ({
       partialHealing: state.settings.partialHealing,
       visual: state.settings.visual,
       collisions: state.settings.collisions,
+      particleInteraction: state.settings.particleInteraction,
     };
     
     const defaultState: DefaultState = {

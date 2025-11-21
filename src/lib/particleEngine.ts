@@ -1,5 +1,6 @@
 import type { Particle, ForceFieldSettings, MousePosition, ForcePulse, RecordedFrame } from '../types/particle';
 import { getColorDistance } from './colorUtils';
+import { generateTilesFromImage } from './imageTiler';
 
 export class ParticleEngine {
   private particles: Particle[] = [];
@@ -196,7 +197,7 @@ export class ParticleEngine {
     let index = 0;
     // Optional spatial grid for simple local collision checks
     const collisionsEnabled = !!this.settings.collisions?.enabled;
-    const gridSize = 32; // coarse grid cell size in px
+    const gridSize = 16; // finer grid cell size in px (was 32, reduced for better detection)
     const grid: Map<string, number[]> = collisionsEnabled ? new Map() : new Map();
     if (collisionsEnabled) {
       for (let i = 0; i < this.particles.length; i++) {
@@ -240,7 +241,8 @@ export class ParticleEngine {
           const healingBoost = particle.healingMultiplier && this.settings.partialHealing?.enabled
             ? particle.healingMultiplier
             : 1;
-          const force = this.settings.restorationForce * 0.01 * healingBoost;
+          // Improved: use better scaling (0.02 instead of 0.01) so max force at 500 = 10 instead of 5
+          const force = this.settings.restorationForce * 0.02 * healingBoost;
           particle.vx += (dx / distance) * force;
           particle.vy += (dy / distance) * force;
         }
@@ -620,11 +622,36 @@ export class ParticleEngine {
         }
       }
 
-      // Adaptive damping guard: increase damping as restorationForce grows to prevent overshoot
-      const baseDamping = this.settings.healingFactor / 100; // user viscosity [0..1]
+      // Motion Resistance (friction): Applied every frame as medium viscosity
+      // Controls how much particles slow down from air resistance
+      const motionResistance = (this.settings.particleInteraction?.friction ?? 0.5) * 0.8; // 0-0.8 range
+      
+      // Adaptive restoration damping: Scale damping based on restoration force to prevent oscillation
+      // Physics: restoration force = spring, damping must be strong enough to prevent overshoot
       const stiffness = this.settings.restorationForce; // 0..500+
-      const extraDamping = Math.min(0.7, (stiffness / 500) * 0.7); // add up to +0.7 with strong stiffness
-      const damping = Math.max(0.12, Math.min(0.98, baseDamping + extraDamping));
+      
+      // Calculate distance to origin for position-aware damping
+      const dxToOrigin = particle.originalX - particle.x;
+      const dyToOrigin = particle.originalY - particle.y;
+      const distanceToOriginSquared = dxToOrigin * dxToOrigin + dyToOrigin * dyToOrigin;
+      const distanceToOrigin = Math.sqrt(distanceToOriginSquared);
+      
+      // Critical damping for restoration force: damping coefficient ~ sqrt(stiffness)
+      // For critical damping with restoration force acting as a spring:
+      // We need damping = sqrt(stiffness * massEffect) to prevent overshoot
+      const criticalDamping = Math.sqrt(Math.max(0, stiffness)) * 0.008; // 0.008 tuning factor
+      
+      // Add extra damping near the resting position to kill final vibrations
+      let settlingDamping = criticalDamping;
+      if (distanceToOrigin < 5) {
+        const proximityFactor = 1 - (distanceToOrigin / 5); // 1.0 at origin, 0.0 at 5px away
+        settlingDamping += proximityFactor * 0.3; // add up to +0.3 extra damping
+      }
+      
+      // Combine motion resistance + settling damping (separate concerns)
+      // Motion resistance acts uniformly; settling damping only near origin
+      const totalDamping = motionResistance + settlingDamping;
+      const damping = Math.max(0.05, Math.min(0.95, totalDamping));
       particle.vx *= (1 - damping);
       particle.vy *= (1 - damping);
 
@@ -641,35 +668,85 @@ export class ParticleEngine {
       particle.x += particle.vx;
       particle.y += particle.vy;
 
-      // Simple local particle-particle separation using spatial grid
+      // Enhanced collision detection: Multi-pass with predictive separation
       if (collisionsEnabled) {
-        const strength = this.settings.collisions?.strength ?? 0.8;
+        const interactionSettings = this.settings.particleInteraction;
+        const collisionStrengthOverride = interactionSettings?.collisionStrength ?? 0.8;
+        const strength = collisionStrengthOverride;
         const radiusMul = this.settings.collisions?.radiusMultiplier ?? 1.2;
-        const gx = Math.floor(particle.x / gridSize);
-        const gy = Math.floor(particle.y / gridSize);
-        for (let oy = -1; oy <= 1; oy++) {
-          for (let ox = -1; ox <= 1; ox++) {
-            const key = `${gx + ox},${gy + oy}`;
-            const indices = grid.get(key);
-            if (!indices) continue;
-            for (const j of indices) {
-              if (j === i) continue;
-              const other = this.particles[j];
-              if (other.visible === false) continue;
-              const dx = particle.x - other.x;
-              const dy = particle.y - other.y;
-              const dist2 = dx * dx + dy * dy;
-              const minDist = (particle.size + other.size) * radiusMul;
-              const minDist2 = minDist * minDist;
-              if (dist2 > 0 && dist2 < minDist2) {
-                const dist = Math.sqrt(dist2);
-                const overlap = (minDist - dist) * 0.5 * strength;
-                const nx = dx / dist;
-                const ny = dy / dist;
-                particle.x += nx * overlap;
-                particle.y += ny * overlap;
-                other.x -= nx * overlap;
-                other.y -= ny * overlap;
+        const elasticity = this.settings.particleInteraction?.elasticity ?? 0.5;
+        const collisionDamping = (1 - elasticity) * 0.7;
+        
+        // Multi-pass collision: Run 2 passes to catch and resolve deep overlaps
+        for (let pass = 0; pass < 2; pass++) {
+          const gx = Math.floor(particle.x / gridSize);
+          const gy = Math.floor(particle.y / gridSize);
+          
+          for (let oy = -1; oy <= 1; oy++) {
+            for (let ox = -1; ox <= 1; ox++) {
+              const key = `${gx + ox},${gy + oy}`;
+              const indices = grid.get(key);
+              if (!indices) continue;
+              
+              for (const j of indices) {
+                if (j === i) continue;
+                const other = this.particles[j];
+                if (other.visible === false) continue;
+                
+                const dx = particle.x - other.x;
+                const dy = particle.y - other.y;
+                const dist2 = dx * dx + dy * dy;
+                const minDist = (particle.size + other.size) * radiusMul;
+                const minDist2 = minDist * minDist;
+                
+                // Predictive separation: Push apart if getting close OR already overlapping
+                // Prevention threshold: 1.3x of collision distance - start repelling before overlap
+                const preventionThreshold = minDist * 1.3;
+                const preventionThreshold2 = preventionThreshold * preventionThreshold;
+                
+                if (dist2 > 0 && dist2 < preventionThreshold2) {
+                  const dist = Math.sqrt(dist2);
+                  
+                  // For overlapping particles: strong separation
+                  // For nearby particles: gentle predictive push
+                  if (dist2 < minDist2) {
+                    // Active collision - strong separation
+                    const overlap = (minDist - dist) * 0.5 * strength;
+                    const nx = dx / dist;
+                    const ny = dy / dist;
+                    particle.x += nx * overlap;
+                    particle.y += ny * overlap;
+                    other.x -= nx * overlap;
+                    other.y -= ny * overlap;
+                    
+                    // Apply damping on actual collision
+                    particle.vx *= (1 - collisionDamping);
+                    particle.vy *= (1 - collisionDamping);
+                    other.vx *= (1 - collisionDamping);
+                    other.vy *= (1 - collisionDamping);
+                  } else {
+                    // Predictive mode: gentle repulsion to prevent collision
+                    // Scale force by proximity: stronger when closer to collision distance
+                    const preventiveFactor = 1 - (dist - minDist) / (preventionThreshold - minDist);
+                    const preventiveForce = strength * 0.15 * preventiveFactor;
+                    const nx = dx / dist;
+                    const ny = dy / dist;
+                    
+                    // Apply gentle repulsion to velocities
+                    particle.vx += nx * preventiveForce;
+                    particle.vy += ny * preventiveForce;
+                    other.vx -= nx * preventiveForce;
+                    other.vy -= ny * preventiveForce;
+                    
+                    // Apply light damping even in predictive mode (for smoother interaction)
+                    // Use reduced damping: 30% of collision damping
+                    const predictiveDamping = collisionDamping * 0.3;
+                    particle.vx *= (1 - predictiveDamping);
+                    particle.vy *= (1 - predictiveDamping);
+                    other.vx *= (1 - predictiveDamping);
+                    other.vy *= (1 - predictiveDamping);
+                  }
+                }
               }
             }
           }
@@ -677,12 +754,23 @@ export class ParticleEngine {
       }
 
       // Stabilize particles very close to their original positions to prevent micro-oscillation
-      const dxToOrigin = particle.originalX - particle.x;
-      const dyToOrigin = particle.originalY - particle.y;
-      const distanceToOriginSquared = dxToOrigin * dxToOrigin + dyToOrigin * dyToOrigin;
       const speedSquared = particle.vx * particle.vx + particle.vy * particle.vy;
-      // If within ~1px of origin and moving slow, snap to rest
-      if (distanceToOriginSquared < 1 && speedSquared < 0.02) {
+      
+      // Recalculate distance to origin for stabilization checks
+      const dxToOriginStab = particle.originalX - particle.x;
+      const dyToOriginStab = particle.originalY - particle.y;
+      const distanceToOriginSquaredStab = dxToOriginStab * dxToOriginStab + dyToOriginStab * dyToOriginStab;
+      
+      // With critical damping in place, we can snap to rest more aggressively
+      // If within 1px of origin and speed is very low (or no restoration force), snap to rest
+      if (distanceToOriginSquaredStab < 1 && speedSquared < 0.005) {
+        particle.x = particle.originalX;
+        particle.y = particle.originalY;
+        particle.vx = 0;
+        particle.vy = 0;
+      }
+      // For particles with any restoration force moving very slowly near origin, snap immediately
+      else if (this.settings.restorationForce > 0 && distanceToOriginSquaredStab < 4 && speedSquared < 0.01) {
         particle.x = particle.originalX;
         particle.y = particle.originalY;
         particle.vx = 0;
@@ -691,20 +779,24 @@ export class ParticleEngine {
 
       // Handle wall collisions
       if (this.settings.wallsEnabled) {
+        // Calculate bounce response based on elasticity (0=dead bounce, 1=perfect bounce)
+        const elasticity = this.settings.particleInteraction?.elasticity ?? 0.5;
+        const bounceCoef = 0.5 + elasticity * 0.5; // maps 0-1 elasticity to 0.5-1.0 bounce coefficient
+        
         if (particle.x - particle.size < 0) {
           particle.x = particle.size;
-          particle.vx = -particle.vx * 0.8;
+          particle.vx = -particle.vx * bounceCoef;
         } else if (particle.x + particle.size > this.canvasWidth) {
           particle.x = this.canvasWidth - particle.size;
-          particle.vx = -particle.vx * 0.8;
+          particle.vx = -particle.vx * bounceCoef;
         }
 
         if (particle.y - particle.size < 0) {
           particle.y = particle.size;
-          particle.vy = -particle.vy * 0.8;
+          particle.vy = -particle.vy * bounceCoef;
         } else if (particle.y + particle.size > this.canvasHeight) {
           particle.y = this.canvasHeight - particle.size;
-          particle.vy = -particle.vy * 0.8;
+          particle.vy = -particle.vy * bounceCoef;
         }
       }
     }
@@ -987,9 +1079,9 @@ export class ParticleEngine {
       ctx.fillRect(0, 0, this.canvasWidth, this.canvasHeight);
     }
     // Glow/Additive blend
-    if (visual?.glowEnabled) {
+    if (visual?.glowEnabled || (this.settings.tileGlowOnScatter && this.settings.animationMode === 'imageCrops')) {
       ctx.shadowColor = 'rgba(255,255,255,0.6)';
-      ctx.shadowBlur = visual.glowStrength ?? 8;
+      ctx.shadowBlur = visual?.glowStrength ?? 8;
     } else {
       ctx.shadowBlur = 0;
     }
@@ -1029,40 +1121,114 @@ export class ParticleEngine {
         continue;
       }
 
-      // Set color once per particle
-      ctx.fillStyle = particle.color;
-      
-      // Remove unnecessary strokeStyle and lineWidth for better performance
-      // ctx.strokeStyle = particle.color;
-      // ctx.lineWidth = 1;
-
-      switch (particle.shape) {
-        case 'circle':
-          ctx.beginPath();
-          ctx.arc(particle.x, particle.y, particle.size, 0, twoPi);
-          ctx.fill();
-          break;
-        case 'square':
-          const size = particle.size;
-          const halfSize = size;
-          ctx.fillRect(
-            particle.x - halfSize,
-            particle.y - halfSize,
-            size * 2,
-            size * 2
-          );
-          break;
-        case 'triangle':
-          const triSize = particle.size;
-          ctx.beginPath();
-          ctx.moveTo(particle.x, particle.y - triSize);
-          ctx.lineTo(particle.x - triSize, particle.y + triSize);
-          ctx.lineTo(particle.x + triSize, particle.y + triSize);
-          ctx.closePath();
-          ctx.fill();
-          break;
+      // Check if this is an image tile
+      if (particle.tileImageData && this.settings.animationMode === 'imageCrops') {
+        this.drawTile(ctx, particle);
+      } else {
+        // Draw regular particle shape
+        ctx.fillStyle = particle.color;
+        
+        switch (particle.shape) {
+          case 'circle':
+            ctx.beginPath();
+            ctx.arc(particle.x, particle.y, particle.size, 0, twoPi);
+            ctx.fill();
+            break;
+          case 'square':
+            const size = particle.size;
+            const halfSize = size;
+            ctx.fillRect(
+              particle.x - halfSize,
+              particle.y - halfSize,
+              size * 2,
+              size * 2
+            );
+            break;
+          case 'triangle':
+            const triSize = particle.size;
+            ctx.beginPath();
+            ctx.moveTo(particle.x, particle.y - triSize);
+            ctx.lineTo(particle.x - triSize, particle.y + triSize);
+            ctx.lineTo(particle.x + triSize, particle.y + triSize);
+            ctx.closePath();
+            ctx.fill();
+            break;
+        }
       }
     }
+  }
+
+  /**
+   * Draw a tile particle (image crop)
+   * Worker-safe implementation that avoids document.createElement
+   */
+  private drawTile(ctx: CanvasRenderingContext2D, particle: Particle): void {
+    if (!particle.tileImageData || !particle.tileSize) return;
+
+    ctx.save();
+
+    // Translate to particle position
+    ctx.translate(particle.x, particle.y);
+
+    // Apply rotation if enabled - calculate rotation based on velocity magnitude
+    if (this.settings.tileRotationOnScatter) {
+      // Rotate based on velocity (faster movement = more rotation)
+      const velocity = Math.sqrt(particle.vx * particle.vx + particle.vy * particle.vy);
+      const rotationAngle = velocity * 0.02; // Scale velocity to rotation angle
+      ctx.rotate(rotationAngle);
+    }
+
+    // Draw the tile image data directly
+    // Support both square and rectangular tiles
+    const tileWidth = particle.tileSize;
+    const tileHeight = particle.tileHeightSize || particle.tileSize; // Default to square if height not specified
+    
+    ctx.drawImage(
+      this.imageDataToCanvas(particle.tileImageData),
+      -tileWidth / 2,
+      -tileHeight / 2,
+      tileWidth,
+      tileHeight
+    );
+
+    ctx.restore();
+  }
+
+  /**
+   * Convert ImageData to a drawable canvas element
+   * Cached for performance - stores small canvas elements for tiles
+   */
+  private imageDataCanvasCache = new Map<ImageData, HTMLCanvasElement | OffscreenCanvas>();
+
+  private imageDataToCanvas(imageData: ImageData): HTMLCanvasElement | OffscreenCanvas {
+    // Check cache first
+    if (this.imageDataCanvasCache.has(imageData)) {
+      return this.imageDataCanvasCache.get(imageData)!;
+    }
+
+    let canvas: HTMLCanvasElement | OffscreenCanvas;
+    
+    // Use OffscreenCanvas in worker, regular canvas in main thread
+    if (typeof OffscreenCanvas !== 'undefined' && typeof document === 'undefined') {
+      canvas = new OffscreenCanvas(imageData.width, imageData.height);
+    } else if (typeof document !== 'undefined') {
+      canvas = document.createElement('canvas');
+      canvas.width = imageData.width;
+      canvas.height = imageData.height;
+    } else {
+      // Fallback - shouldn't reach here
+      throw new Error('No canvas implementation available');
+    }
+
+    const ctx = canvas.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
+    if (!ctx) throw new Error('Failed to get canvas context');
+
+    ctx.putImageData(imageData, 0, 0);
+
+    // Cache for performance
+    this.imageDataCanvasCache.set(imageData, canvas);
+
+    return canvas;
   }
 
   setMousePosition(x: number, y: number, active: boolean): void {
@@ -1364,5 +1530,57 @@ export class ParticleEngine {
       data[i + 3] = 255;  // A
     }
     this.particles = this.generateParticlesFromImage(defaultImageData);
+  }
+
+  /**
+   * Generate particles from image tiles (image crops mode)
+   * Each tile becomes a particle that can scatter and reassemble
+   */
+  generateParticlesFromImageTiles(imageData: ImageData, gridSize: number): Particle[] {
+    const { width: imageWidth, height: imageHeight } = imageData;
+    const particles: Particle[] = [];
+
+    const tiles = generateTilesFromImage(imageData, gridSize);
+
+    // Calculate tile size to perfectly fill canvas without gaps
+    // Tiles should fill entire canvas from corner to corner, no centering
+    const displayTileWidth = this.canvasWidth / gridSize;
+    const displayTileHeight = this.canvasHeight / gridSize;
+
+    // Use full dimensions - tiles can be non-square to fill entire canvas
+    // This ensures zero gaps at edges
+    
+    for (const tile of tiles) {
+      // Calculate canvas position for this tile - place tiles in a grid covering full canvas
+      // No offset/centering - start from (0,0) and fill to edges
+      const tileLeft = tile.gridX * displayTileWidth;
+      const tileTop = tile.gridY * displayTileHeight;
+      const canvasX = tileLeft + displayTileWidth / 2;
+      const canvasY = tileTop + displayTileHeight / 2;
+
+      const particle: Particle = {
+        x: canvasX,
+        y: canvasY,
+        originalX: canvasX,
+        originalY: canvasY,
+        vx: 0,
+        vy: 0,
+        color: tile.color,
+        // Size for collision: use the larger dimension to ensure full collision coverage
+        size: Math.max(displayTileWidth, displayTileHeight) / 2,
+        shape: 'square',
+        visible: true,
+        tileImageData: tile.imageData,
+        tileSize: displayTileWidth, // Store width for horizontal rendering
+        tileHeightSize: displayTileHeight, // Store height for vertical rendering
+        rotation: 0,
+        healingMultiplier: 1.0,
+      };
+
+      particles.push(particle);
+    }
+
+    console.log(`Generated ${particles.length} tile particles in ${gridSize}x${gridSize} grid, tile size: ${displayTileWidth.toFixed(1)}x${displayTileHeight.toFixed(1)}px`);
+    return particles;
   }
 } 

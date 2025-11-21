@@ -10,6 +10,11 @@ export interface Particle {
   shape: 'circle' | 'square' | 'triangle';
   visible?: boolean; // Add visibility property for filtering
   healingMultiplier?: number; // Multiplier applied to restoration force for partial healing
+  // For image tiles mode
+  tileImageData?: ImageData; // Tile texture for image crops mode
+  tileSize?: number; // Width in pixels for tile rendering
+  tileHeightSize?: number; // Height in pixels for tile rendering (can differ from width for rectangular tiles)
+  rotation?: number; // Rotation angle for scattered tiles effect
 }
 
 export type ForceType = 'attraction' | 'repulsion' | 'vortex' | 'collider' | 'turbulence';
@@ -62,6 +67,12 @@ export interface ForceFieldSettings {
   partialHealing?: PartialHealingSettings;
   visual?: VisualSettings;
   collisions?: ParticleCollisionSettings;
+  particleInteraction?: ParticleInteractionSettings;
+  // Animation mode settings
+  animationMode?: 'particles' | 'imageCrops'; // 'particles' = pixel particles, 'imageCrops' = tiled image
+  imageCropGridSize?: number; // Grid size for image tiles (8-64), e.g., 16 = 16x16 grid
+  tileRotationOnScatter?: boolean; // Enable rotation effect when tiles scatter
+  tileGlowOnScatter?: boolean; // Enable glow effect on scattered tiles
 }
 
 export interface ColorFilterSettings {
@@ -107,6 +118,11 @@ export interface ControlPanelSettings {
   partialHealing?: PartialHealingSettings;
   visual?: VisualSettings;
   collisions?: ParticleCollisionSettings;
+  particleInteraction?: ParticleInteractionSettings;
+  animationMode?: 'particles' | 'imageCrops';
+  imageCropGridSize?: number;
+  tileRotationOnScatter?: boolean;
+  tileGlowOnScatter?: boolean;
 }
 
 export interface PerformanceSettings {
@@ -136,6 +152,12 @@ export interface ParticleCollisionSettings {
   enabled: boolean;
   strength: number; // separation impulse multiplier
   radiusMultiplier: number; // expand collision radius relative to size sum
+}
+
+export interface ParticleInteractionSettings {
+  elasticity: number; // 0-1: how bouncy particles are (0=sand, 1=billiard balls)
+  collisionStrength: number; // 0-1: how forcefully particles push each other apart
+  friction: number; // 0-1: energy loss during movement (0=floaty, 1=sticky/sluggish)
 }
 
 export type ExportPreset = 'original' | 'instagramReel' | 'youtube' | 'square' | 'custom';
@@ -183,6 +205,7 @@ export interface ForcePulse {
   type: ForcePulseType;
   durationMs: number;
   strength: number; // generic scale used by type-specific fields
+  mode?: 'impulse' | 'continuous'; // 'impulse' = fire once, 'continuous' = keep applying until stopped (default: impulse)
   origin?: { x: number; y: number; normalized?: boolean }; // default center if omitted
   directionDeg?: number; // for wind/gravity direction
   clockwise?: boolean; // for tornado
