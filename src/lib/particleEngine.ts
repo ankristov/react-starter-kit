@@ -1108,6 +1108,16 @@ export class ParticleEngine {
       return;
     }
 
+    // FIXED: When no colors are selected, show all particles regardless of filter mode
+    // This prevents the issue where all particles become invisible when filter is enabled but no colors selected
+    if (!colorFilterSettings.selectedColors || colorFilterSettings.selectedColors.length === 0) {
+      console.log('[ColorFilter] No colors selected, showing all particles');
+      for (const particle of this.particles) {
+        particle.visible = true;
+      }
+      return;
+    }
+
     // Create a Set for O(1) lookups
     const selectedColorsSet = new Set(colorFilterSettings.selectedColors);
     const mode = colorFilterSettings.filterMode || 'show';
@@ -1117,6 +1127,8 @@ export class ParticleEngine {
       const inSet = selectedColorsSet.has(particle.color);
       particle.visible = mode === 'show' ? inSet : !inSet;
     }
+    
+    console.log(`[ColorFilter] Applied filter: mode=${mode}, selected=${colorFilterSettings.selectedColors.length} colors, visible=${this.particles.filter(p => p.visible).length}/${this.particles.length} particles`);
   }
 
   // Check if a particle should be visible based on color filter
@@ -1776,16 +1788,51 @@ export class ParticleEngine {
     // Generate tiles from the image using the proper tiling function
     const tiles = generateTilesFromImage(imageData, gridSize);
 
-    // CRITICAL: Calculate tile size based on CANVAS dimensions to fill entire canvas
-    const tileWidth = this.canvasWidth / gridSize;
-    const tileHeight = this.canvasHeight / gridSize;
+    if (tiles.length === 0) {
+      console.warn('No tiles generated, falling back to default particles');
+      return this.generateParticlesFromImage(imageData, backgroundImage);
+    }
+
+    // FIXED: Calculate positioning that maintains alignment with background image
+    // If background image exists, use its positioning; otherwise scale to fill canvas
+    let scaleX = 1;
+    let scaleY = 1;
+    let offsetX = 0;
+    let offsetY = 0;
+
+    if (backgroundImage && backgroundImage.originalWidth && backgroundImage.originalHeight) {
+      // Background image exists - match its positioning exactly
+      const bgScaleX = this.canvasWidth / backgroundImage.originalWidth;
+      const bgScaleY = this.canvasHeight / backgroundImage.originalHeight;
+      
+      // Use the same scaling that background image uses
+      const bgScale = backgroundImage.scale || 1;
+      scaleX = bgScaleX * bgScale;
+      scaleY = bgScaleY * bgScale;
+      
+      // Apply background image positioning
+      offsetX = backgroundImage.positionX || 0;
+      offsetY = backgroundImage.positionY || 0;
+      
+      console.log(`[ImageTiles] Matching background positioning: scale=${bgScale.toFixed(3)}, offset=(${offsetX}, ${offsetY})`);
+    } else {
+      // No background image - scale to fill canvas while maintaining aspect ratio
+      scaleX = this.canvasWidth / imageWidth;
+      scaleY = this.canvasHeight / imageHeight;
+      
+      console.log(`[ImageTiles] Scaling to fill canvas: scaleX=${scaleX.toFixed(3)}, scaleY=${scaleY.toFixed(3)}`);
+    }
 
     // Use the tiles with their correct grid positions (gridX, gridY)
     for (const tile of tiles) {
-      // Calculate tile position using the tile's actual grid coordinates
-      // This prevents the shifting/skewing issue
-      const canvasX = tile.gridX * tileWidth + tileWidth / 2;
-      const canvasY = tile.gridY * tileHeight + tileHeight / 2;
+      // Calculate tile position based on its ACTUAL pixel position in the source image
+      // Scale and offset to match background image positioning
+      const canvasX = (tile.pixelX + tile.imageData.width / 2) * scaleX + offsetX;
+      const canvasY = (tile.pixelY + tile.imageData.height / 2) * scaleY + offsetY;
+
+      // Calculate tile size based on actual tile dimensions scaled to canvas
+      const tileWidth = tile.imageData.width * scaleX;
+      const tileHeight = tile.imageData.height * scaleY;
 
       const particle: Particle = {
         x: canvasX,
@@ -1808,7 +1855,7 @@ export class ParticleEngine {
       particles.push(particle);
     }
 
-    console.log(`Generated ${particles.length} tile particles filling entire ${this.canvasWidth}x${this.canvasHeight} canvas with ${tileWidth.toFixed(1)}x${tileHeight.toFixed(1)} tiles`);
+    console.log(`Generated ${particles.length} tile particles with perfect alignment to background image`);
     return particles;
   }
 } 

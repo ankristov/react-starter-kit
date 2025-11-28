@@ -481,10 +481,24 @@ export function ControlPanel() {
     // Update the existing engine's settings
     engine.updateSettings({ ...currentSettings, particleDensity: densityToUse, imageCropGridSize: gridSizeToUse });
     
-    // keep canvas size synced with desired size if set
-    const target = explicitSize ?? currentDesiredSize ?? { width: imageData.width, height: imageData.height };
-    setDesiredCanvasSize(target); // update store so canvas effect resizes too
-    engine.setCanvasSize(target.width, target.height);
+    // FIXED: For refresh, maintain current canvas dimensions instead of image dimensions
+    // Get current canvas size from engine or use current desired size
+    const currentCanvasSize = { 
+      width: engine.canvasWidth || target.width, 
+      height: engine.canvasHeight || target.height 
+    };
+    
+    // Use explicit size if provided, otherwise maintain current canvas size
+    const targetSize = explicitSize ?? currentDesiredSize ?? currentCanvasSize;
+    
+    // Only update canvas size if it's actually changing to prevent unnecessary resizing
+    if (engine.canvasWidth !== targetSize.width || engine.canvasHeight !== targetSize.height) {
+      setDesiredCanvasSize(targetSize);
+      engine.setCanvasSize(targetSize.width, targetSize.height);
+      console.log(`[Refresh] Canvas size updated to: ${targetSize.width}x${targetSize.height}`);
+    } else {
+      console.log(`[Refresh] Maintaining canvas size: ${targetSize.width}x${targetSize.height}`);
+    }
     
     // Generate particles based on animation mode
     let particles;
@@ -2176,7 +2190,7 @@ export function ControlPanel() {
                       onValueChange={(val) => updateSettings({ particleInteraction: { ...currentInteraction, collisionStrength: val[0] } })}
                       min={0}
                       max={1}
-                      step={0.05}
+                      step={0.01}
                       className="w-full"
                     />
                     <p className="text-[10px] text-purple-400/60 mt-1">Repulsion force strength during particle interaction</p>
