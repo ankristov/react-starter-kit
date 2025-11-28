@@ -23,7 +23,9 @@ export interface TileGridConfig {
 
 /**
  * Generate tiles from an image
- * Divides the image into a grid of square tiles
+ * Creates ALWAYS SQUARE tiles based on the shortest dimension
+ * Grid size = number of cells in the shortest dimension
+ * Tile sizes are adjusted so they fit PERFECTLY without gaps using integer math
  */
 export function generateTilesFromImage(
   imageData: ImageData,
@@ -32,50 +34,78 @@ export function generateTilesFromImage(
   const { width: imgWidth, height: imgHeight } = imageData;
   const tiles: ImageTile[] = [];
 
-  const tilePixelSize = Math.floor(imgWidth / gridSize);
-  const actualGridSize = Math.ceil(imgWidth / tilePixelSize); // Adjust for non-perfect divisions
+  if (imgWidth <= 0 || imgHeight <= 0 || gridSize <= 0) {
+    console.warn(`[ImageTiler] Invalid parameters: ${imgWidth}x${imgHeight}, gridSize: ${gridSize}`);
+    return tiles;
+  }
 
-  console.log(
-    `[ImageTiler] Generating ${actualGridSize}x${actualGridSize} grid from ${imgWidth}x${imgHeight} image`,
-    `Tile pixel size: ${tilePixelSize}`
+  // Grid size applies to the SHORTEST dimension
+  const shortestDim = Math.min(imgWidth, imgHeight);
+  
+  // Calculate tile size for the shortest dimension (round down)
+  const baseTileSize = Math.max(1, Math.floor(shortestDim / gridSize));
+  
+  // Calculate how many tiles we need in each dimension
+  const tilesWide = Math.ceil(imgWidth / baseTileSize);
+  const tilesTall = Math.ceil(imgHeight / baseTileSize);
+  
+  // Use the maximum to ensure all tiles are square
+  const squareTileSize = Math.max(
+    Math.ceil(imgWidth / tilesWide),
+    Math.ceil(imgHeight / tilesTall)
   );
 
-  for (let row = 0; row < actualGridSize; row++) {
-    for (let col = 0; col < actualGridSize; col++) {
-      const pixelX = col * tilePixelSize;
-      const pixelY = row * tilePixelSize;
+  console.log(
+    `[ImageTiler] Creating square crops from ${imgWidth}x${imgHeight} image`,
+    `Grid size: ${gridSize}, base tile: ${baseTileSize}px`,
+    `Square tile size: ${squareTileSize}px, Grid: ${tilesWide}x${tilesTall}`
+  );
 
-      // Skip tiles that are completely outside the image
-      if (pixelX >= imgWidth || pixelY >= imgHeight) {
+  for (let row = 0; row < tilesTall; row++) {
+    for (let col = 0; col < tilesWide; col++) {
+      // Calculate tile boundaries
+      // Use simple grid positioning: each tile gets squareTileSize pixels
+      // except the last tile in each dimension which extends to the image boundary
+      const pixelXStart = col * squareTileSize;
+      const pixelYStart = row * squareTileSize;
+      
+      // Last column extends to image right edge, others get full tile size
+      const pixelXEnd = col === tilesWide - 1 ? imgWidth : Math.min((col + 1) * squareTileSize, imgWidth);
+      // Last row extends to image bottom edge, others get full tile size
+      const pixelYEnd = row === tilesTall - 1 ? imgHeight : Math.min((row + 1) * squareTileSize, imgHeight);
+      
+      // Clamp to valid bounds
+      const startX = Math.max(0, Math.min(pixelXStart, imgWidth - 1));
+      const startY = Math.max(0, Math.min(pixelYStart, imgHeight - 1));
+      const endX = Math.max(startX + 1, Math.min(pixelXEnd, imgWidth));
+      const endY = Math.max(startY + 1, Math.min(pixelYEnd, imgHeight));
+      
+      const tileWidth = endX - startX;
+      const tileHeight = endY - startY;
+
+      if (tileWidth <= 0 || tileHeight <= 0) {
+        console.warn(`[ImageTiler] Skipping invalid tile at [${row},${col}]: ${tileWidth}x${tileHeight}`);
         continue;
       }
-
-      // Adjust tile size for edge tiles
-      const currentTileSize = Math.min(
-        tilePixelSize,
-        imgWidth - pixelX,
-        imgHeight - pixelY
-      );
 
       // Extract tile image data
       const tileImageData = extractTileImageData(
         imageData,
-        pixelX,
-        pixelY,
-        currentTileSize,
-        currentTileSize
+        startX,
+        startY,
+        tileWidth,
+        tileHeight
       );
 
-      // Calculate average color for the tile
       const avgColor = calculateAverageColor(tileImageData);
 
       const tile: ImageTile = {
         id: `tile-${row}-${col}`,
         gridX: col,
         gridY: row,
-        pixelX,
-        pixelY,
-        tileSize: currentTileSize,
+        pixelX: startX,  // Store the ACTUAL pixel position where tile was extracted
+        pixelY: startY,
+        tileSize: squareTileSize,
         imageData: tileImageData,
         color: avgColor,
       };
@@ -84,7 +114,12 @@ export function generateTilesFromImage(
     }
   }
 
-  console.log(`[ImageTiler] Generated ${tiles.length} tiles`);
+  console.log(`[ImageTiler] Generated ${tiles.length} tiles (expected ${tilesWide * tilesTall})`);
+  
+  if (tiles.length === 0) {
+    console.error(`[ImageTiler] ERROR: No tiles generated! Image: ${imgWidth}x${imgHeight}, GridSize: ${gridSize}, BaseTile: ${baseTileSize}, Grid: ${tilesWide}x${tilesTall}`);
+  }
+  
   return tiles;
 }
 

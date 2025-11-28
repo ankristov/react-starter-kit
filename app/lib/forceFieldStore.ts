@@ -144,6 +144,8 @@ export const useForceFieldStore = create<ForceFieldState>((set, get) => ({
       const { colorFilter } = get();
       particleSystem.applyColorFilter(colorFilter);
       set({ currentImage: imageData });
+      // Force a re-render by triggering a state update
+      set(state => ({ particleSystem: state.particleSystem }));
     }
   },
 

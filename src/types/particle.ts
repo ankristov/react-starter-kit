@@ -215,6 +215,7 @@ export interface ForcePulse {
   easeIn?: number; // 0-1, how much to ease in at start (0 = no ease, 1 = full ease)
   easeOut?: number; // 0-1, how much to ease out at end (0 = no ease, 1 = full ease)
   easeType?: 'linear' | 'ease-in' | 'ease-out' | 'ease-in-out' | 'ease-in-cubic' | 'ease-out-cubic' | 'ease-in-out-cubic' | 'ease-in-quad' | 'ease-out-quad' | 'ease-in-out-quad'; // Type of easing curve
+  inertiaMs?: number; // Additional time to let particles coast to a stop after pulse ends (default 0ms, no inertia)
   // For randomize - timing controls
   scatterSpeed?: number; // speed multiplier for moving to random positions (default 3.0)
   scatterDurationPercent?: number; // percentage of total duration for scatter phase (default 30)

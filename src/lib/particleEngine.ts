@@ -14,6 +14,7 @@ export class ParticleEngine {
   private lastMouseY: number = 0;
   private mouseHasMoved: boolean = false;
   private activePulses: Array<ForcePulse & { id: string; start: number } > = [];
+  private continuousPulses: Map<string, Omit<ForcePulse, 'id'>> = new Map(); // Track continuous pulses to re-enqueue
   // For randomize effect: store random target positions per particle
   private randomizeTargets: Map<string, Map<number, { x: number; y: number }>> = new Map();
   // For state recording: store particle states during recording
@@ -43,18 +44,24 @@ export class ParticleEngine {
     }
   }
 
-  generateParticlesFromImage(imageData: ImageData): Particle[] {
+  generateParticlesFromImage(imageData: ImageData, backgroundImage?: any): Particle[] {
     const { width: imageWidth, height: imageHeight, data } = imageData;
     const particles: Particle[] = [];
     
     // Calculate the scale to map canvas coordinates to image coordinates
     const scale = this.settings.imageScale ?? 1;
     
+    // Get background image transformations if provided
+    const bgScale = backgroundImage?.scale ?? 1;
+    const bgPositionX = backgroundImage?.positionX ?? 0;
+    const bgPositionY = backgroundImage?.positionY ?? 0;
+    const bgRotation = (backgroundImage?.rotation ?? 0) * Math.PI / 180; // Convert to radians
+    
     // Calculate the effective particle system dimensions on canvas (scaled image area)
     const scaledImageW = imageWidth * scale;
     const scaledImageH = imageHeight * scale;
-    const offsetX = (this.canvasWidth - scaledImageW) / 2;
-    const offsetY = (this.canvasHeight - scaledImageH) / 2;
+    const offsetX = (this.canvasWidth - scaledImageW) / 2 + bgPositionX;
+    const offsetY = (this.canvasHeight - scaledImageH) / 2 + bgPositionY;
     
     // Calculate particle spacing and size to ensure full canvas coverage
     // Goal: Generate approximately particleDensity particles that fill the canvas without gaps
@@ -100,9 +107,44 @@ export class ParticleEngine {
         const clampedCanvasX = Math.max(baseParticleSize, Math.min(canvasX, this.canvasWidth - baseParticleSize));
         const clampedCanvasY = Math.max(baseParticleSize, Math.min(canvasY, this.canvasHeight - baseParticleSize));
         
-        // Map canvas coordinates to image coordinates
-        const imageX = Math.floor((clampedCanvasX - offsetX) / scale);
-        const imageY = Math.floor((clampedCanvasY - offsetY) / scale);
+        // If background image has rotation or scale, reverse-transform the canvas position to image space
+        let imageX: number, imageY: number;
+        
+        if (bgScale !== 1 || bgRotation !== 0) {
+          // Reverse transform: canvas coords -> background image centered coords
+          const centerX = this.canvasWidth / 2;
+          const centerY = this.canvasHeight / 2;
+          
+          // Translate to origin
+          let dx = clampedCanvasX - centerX - bgPositionX;
+          let dy = clampedCanvasY - centerY - bgPositionY;
+          
+          // Reverse rotation
+          if (bgRotation !== 0) {
+            const cosR = Math.cos(-bgRotation);
+            const sinR = Math.sin(-bgRotation);
+            const dx2 = dx * cosR - dy * sinR;
+            const dy2 = dx * sinR + dy * cosR;
+            dx = dx2;
+            dy = dy2;
+          }
+          
+          // Reverse scale
+          if (bgScale !== 1) {
+            dx /= bgScale;
+            dy /= bgScale;
+          }
+          
+          // Map to image coordinates
+          const scaledImageW = imageWidth * scale;
+          const scaledImageH = imageHeight * scale;
+          imageX = Math.floor((dx + scaledImageW / 2) / scale);
+          imageY = Math.floor((dy + scaledImageH / 2) / scale);
+        } else {
+          // Simple case: no rotation or scale, just positional offset
+          imageX = Math.floor((clampedCanvasX - offsetX) / scale);
+          imageY = Math.floor((clampedCanvasY - offsetY) / scale);
+        }
         
         // Clamp to image bounds
         const clampedX = Math.max(0, Math.min(imageX, imageWidth - 1));
@@ -172,6 +214,34 @@ export class ParticleEngine {
       });
       this.randomizeTargets.set(id, targets);
     }
+  }
+
+  /**
+   * Set a continuous pulse that will be re-enqueued indefinitely
+   * until it's removed with removeContinuousPulse
+   */
+  setContinuousPulse(id: string, pulse: Omit<ForcePulse, 'id'>): void {
+    this.continuousPulses.set(id, pulse);
+    // Immediately enqueue it
+    this.enqueuePulse(pulse);
+  }
+
+  /**
+   * Update an active continuous pulse with new parameters
+   * Useful for real-time adjustments during animation
+   */
+  updateContinuousPulse(id: string, updates: Partial<Omit<ForcePulse, 'id'>>): void {
+    const existing = this.continuousPulses.get(id);
+    if (existing) {
+      this.continuousPulses.set(id, { ...existing, ...updates });
+    }
+  }
+
+  /**
+   * Remove a continuous pulse (stops re-enqueueing)
+   */
+  removeContinuousPulse(id: string): void {
+    this.continuousPulses.delete(id);
   }
 
   updateParticles(): void {
@@ -253,11 +323,42 @@ export class ParticleEngine {
         let ax = 0; let ay = 0;
         for (const p of this.activePulses) {
           const t = (now - p.start);
-          const progress = Math.min(1, t / p.durationMs);
-          let k = 1 - progress; // Base strength multiplier (1 at start, 0 at end)
+          const inertiaMs = p.inertiaMs ?? 0;
+          const totalDurationMs = p.durationMs + inertiaMs;
+          
+          // Check if pulse is still active (including inertia phase)
+          if (t >= totalDurationMs) {
+            // Pulse fully expired, skip
+            continue;
+          }
+          
+          let progress: number;
+          let inInertiaPhase = false;
+          
+          if (t >= p.durationMs) {
+            // In inertia phase - gradually decay force to zero
+            inInertiaPhase = true;
+            const inertiaProgress = (t - p.durationMs) / inertiaMs;
+            progress = 1 - inertiaProgress; // 1.0 at start of inertia, 0.0 at end
+          } else {
+            // In main force phase
+            progress = Math.min(1, t / p.durationMs);
+          }
+          
+          // For continuous mode: apply easing in, then hold
+          // For impulse mode: apply with decay
+          // During inertia phase: always decay to zero regardless of mode
+          let k: number;
+          if (inInertiaPhase) {
+            // During inertia: decay force smoothly from 1 to 0
+            k = progress; // This is already 1→0 from our earlier calculation
+          } else {
+            // During main force phase: normal behavior
+            k = p.mode === 'continuous' ? 1 : (1 - progress); // Start at 1 for continuous, decay for impulse
+          }
           
           // Apply ease in/out if specified
-          if ((p.easeIn && p.easeIn > 0) || (p.easeOut && p.easeOut > 0)) {
+          if ((p.easeIn && p.easeIn > 0) || (p.easeOut && p.easeOut > 0) && !inInertiaPhase) {
             const easeType = p.easeType ?? 'linear';
             const easeIn = p.easeIn ?? 0;
             const easeOut = p.easeOut ?? 0;
@@ -316,8 +417,17 @@ export class ParticleEngine {
               easedProgress = linearEnd * (1 - easeOut) + easedEnd * easeOut;
             }
             
-            k = 1 - easedProgress;
-            k = Math.max(0, Math.min(1, k));
+            // For continuous mode: ease in during progress, then hold at 1
+            // For impulse mode: ease out (decay)
+            // Don't apply easing during inertia - just use linear decay
+            if (!inInertiaPhase) {
+              if (p.mode === 'continuous') {
+                k = Math.min(1, easedProgress); // Ramp up and hold
+              } else {
+                k = 1 - easedProgress; // Decay
+              }
+              k = Math.max(0, Math.min(1, k));
+            }
           }
           if (k <= 0) continue;
           switch (p.type) {
@@ -338,8 +448,8 @@ export class ParticleEngine {
               const cx = this.canvasWidth * 0.5; const cy = this.canvasHeight * 0.5;
               const dx = particle.x - cx; const dy = particle.y - cy; const d = Math.hypot(dx, dy) + 1e-3;
               const dir = (p.clockwise ?? true) ? 1 : -1;
-              ax += (-dy / d) * p.strength * 0.25 * dir * k;
-              ay += (dx / d) * p.strength * 0.25 * dir * k;
+              ax += (-dy / d) * p.strength * 0.8 * dir * k;
+              ay += (dx / d) * p.strength * 0.8 * dir * k;
               break;
             }
             case 'shockwave': {
@@ -650,7 +760,35 @@ export class ParticleEngine {
       
       // Combine motion resistance + settling damping (separate concerns)
       // Motion resistance acts uniformly; settling damping only near origin
-      const totalDamping = motionResistance + settlingDamping;
+      let totalDamping = motionResistance + settlingDamping;
+      
+      // INERTIA EFFECT: Check if particle is in inertia phase of any active pulse
+      // During inertia, reduce damping so particles coast longer with the remaining velocity
+      // This works together with the decaying force to create natural deceleration
+      if (this.activePulses.length > 0) {
+        let inertiaReducer = 1.0; // 1.0 = no reduction, 0.0 = infinite coast
+        
+        for (const p of this.activePulses) {
+          const t = now - p.start;
+          const inertiaMs = p.inertiaMs ?? 0;
+          
+          // Only during inertia phase (after force duration ends)
+          if (t >= p.durationMs && inertiaMs > 0) {
+            // How far into the inertia phase (0 = just started, 1 = inertia complete)
+            const inertiaProgress = Math.min(1, (t - p.durationMs) / inertiaMs);
+            
+            // During inertia: keep damping low (reduced to 10-30% of normal)
+            // This lets particles coast with their acquired momentum
+            // As inertia progress increases, damping gradually returns to normal
+            const inertiaDamping = 0.1 + inertiaProgress * 0.9; // 0.1 to 1.0 over inertia duration
+            inertiaReducer = Math.min(inertiaReducer, inertiaDamping);
+          }
+        }
+        
+        // Apply inertia damping reduction
+        totalDamping *= inertiaReducer;
+      }
+      
       const damping = Math.max(0.05, Math.min(0.95, totalDamping));
       particle.vx *= (1 - damping);
       particle.vy *= (1 - damping);
@@ -779,24 +917,100 @@ export class ParticleEngine {
 
       // Handle wall collisions
       if (this.settings.wallsEnabled) {
+        // Get wall mode settings
+        const wallMode = (this.settings as any).wallMode ?? 'bounce'; // 'bounce' or 'confine'
+        
+        // Get repulsion settings
+        const wallRepulsion = (this.settings as any).wallRepulsion ?? { enabled: false, strength: 1.0 };
+        const repulsionForce = wallRepulsion.enabled ? (wallRepulsion.strength ?? 1.0) : 0;
+        
         // Calculate bounce response based on elasticity (0=dead bounce, 1=perfect bounce)
         const elasticity = this.settings.particleInteraction?.elasticity ?? 0.5;
         const bounceCoef = 0.5 + elasticity * 0.5; // maps 0-1 elasticity to 0.5-1.0 bounce coefficient
         
-        if (particle.x - particle.size < 0) {
-          particle.x = particle.size;
-          particle.vx = -particle.vx * bounceCoef;
-        } else if (particle.x + particle.size > this.canvasWidth) {
-          particle.x = this.canvasWidth - particle.size;
-          particle.vx = -particle.vx * bounceCoef;
-        }
+        if (wallMode === 'confine') {
+          // CONFINE MODE: Keep particles within canvas bounds without bouncing
+          // This prevents edge tiles from being displaced relative to grid
+          // Clamp position to stay exactly on canvas boundary (respects particle center, not size)
+          
+          const clampedX = Math.max(0, Math.min(particle.x, this.canvasWidth));
+          const clampedY = Math.max(0, Math.min(particle.y, this.canvasHeight));
+          
+          // Check if particle hit a wall
+          const hitLeftWall = particle.x < 0 && clampedX === 0;
+          const hitRightWall = particle.x > this.canvasWidth && clampedX === this.canvasWidth;
+          const hitTopWall = particle.y < 0 && clampedY === 0;
+          const hitBottomWall = particle.y > this.canvasHeight && clampedY === this.canvasHeight;
+          
+          // Apply clamping
+          particle.x = clampedX;
+          particle.y = clampedY;
+          
+          // Stop velocity in clamped directions to prevent particles from trying to escape
+          if (hitLeftWall || hitRightWall) {
+            particle.vx = 0;
+          }
+          if (hitTopWall || hitBottomWall) {
+            particle.vy = 0;
+          }
+          
+          // Apply repulsion if enabled and particle hit a wall
+          if (repulsionForce > 0) {
+            if (hitLeftWall && Math.abs(particle.vx) > 0.1) {
+              particle.vx = repulsionForce * 0.5; // Push away from left wall (positive)
+            }
+            if (hitRightWall && Math.abs(particle.vx) > 0.1) {
+              particle.vx = -repulsionForce * 0.5; // Push away from right wall (negative)
+            }
+            if (hitTopWall && Math.abs(particle.vy) > 0.1) {
+              particle.vy = repulsionForce * 0.5; // Push away from top wall (positive)
+            }
+            if (hitBottomWall && Math.abs(particle.vy) > 0.1) {
+              particle.vy = -repulsionForce * 0.5; // Push away from bottom wall (negative)
+            }
+          }
+        } else {
+          // BOUNCE MODE (default): Particles bounce with elasticity, clamped by size
+          // Check each wall
+          if (particle.x - particle.size < 0) {
+            // Left wall
+            particle.x = particle.size;
+            particle.vx = -particle.vx * bounceCoef;
+            
+            // Apply repulsion if enabled and particle has velocity
+            if (repulsionForce > 0 && Math.abs(particle.vx) > 0.1) {
+              particle.vx += repulsionForce * 0.5; // Positive X repulsion
+            }
+          } else if (particle.x + particle.size > this.canvasWidth) {
+            // Right wall
+            particle.x = this.canvasWidth - particle.size;
+            particle.vx = -particle.vx * bounceCoef;
+            
+            // Apply repulsion if enabled and particle has velocity
+            if (repulsionForce > 0 && Math.abs(particle.vx) > 0.1) {
+              particle.vx -= repulsionForce * 0.5; // Negative X repulsion
+            }
+          }
 
-        if (particle.y - particle.size < 0) {
-          particle.y = particle.size;
-          particle.vy = -particle.vy * bounceCoef;
-        } else if (particle.y + particle.size > this.canvasHeight) {
-          particle.y = this.canvasHeight - particle.size;
-          particle.vy = -particle.vy * bounceCoef;
+          if (particle.y - particle.size < 0) {
+            // Top wall
+            particle.y = particle.size;
+            particle.vy = -particle.vy * bounceCoef;
+            
+            // Apply repulsion if enabled and particle has velocity
+            if (repulsionForce > 0 && Math.abs(particle.vy) > 0.1) {
+              particle.vy += repulsionForce * 0.5; // Positive Y repulsion
+            }
+          } else if (particle.y + particle.size > this.canvasHeight) {
+            // Bottom wall
+            particle.y = this.canvasHeight - particle.size;
+            particle.vy = -particle.vy * bounceCoef;
+            
+            // Apply repulsion if enabled and particle has velocity
+            if (repulsionForce > 0 && Math.abs(particle.vy) > 0.1) {
+              particle.vy -= repulsionForce * 0.5; // Negative Y repulsion
+            }
+          }
         }
       }
     }
@@ -850,17 +1064,35 @@ export class ParticleEngine {
     this.mouseHasMoved = false;
     // Reset force just enabled flag after first frame
     this.forceWasJustEnabled = false;
-    // Purge expired pulses
+    // Purge expired pulses and re-enqueue continuous ones
     if (this.activePulses.length > 0) {
       const before = this.activePulses.length;
+      const pulsesToReenqueue: Array<string> = [];
+      
       this.activePulses = this.activePulses.filter(p => {
-        const isActive = (now - p.start) < p.durationMs;
-        if (!isActive && p.type === 'randomize') {
-          // Clean up randomize targets when pulse expires
-          this.randomizeTargets.delete(p.id);
+        const inertiaMs = p.inertiaMs ?? 0;
+        const totalDurationMs = p.durationMs + inertiaMs;
+        const isActive = (now - p.start) < totalDurationMs;
+        if (!isActive) {
+          if (p.type === 'randomize') {
+            // Clean up randomize targets when pulse expires
+            this.randomizeTargets.delete(p.id);
+          }
+          // Mark continuous pulses for re-enqueueing
+          if (this.continuousPulses.has(p.id)) {
+            pulsesToReenqueue.push(p.id);
+          }
         }
         return isActive;
       });
+      
+      // Re-enqueue continuous pulses immediately for next frame
+      for (const pulseId of pulsesToReenqueue) {
+        const continuousPulse = this.continuousPulses.get(pulseId);
+        if (continuousPulse) {
+          this.enqueuePulse(continuousPulse);
+        }
+      }
     }
   }
 
@@ -1535,28 +1767,25 @@ export class ParticleEngine {
   /**
    * Generate particles from image tiles (image crops mode)
    * Each tile becomes a particle that can scatter and reassemble
+   * CRITICAL: Fills entire canvas with tiles of exact size: canvasWidth/gridSize x canvasHeight/gridSize
    */
-  generateParticlesFromImageTiles(imageData: ImageData, gridSize: number): Particle[] {
+  generateParticlesFromImageTiles(imageData: ImageData, gridSize: number, backgroundImage?: any): Particle[] {
     const { width: imageWidth, height: imageHeight } = imageData;
     const particles: Particle[] = [];
 
+    // Generate tiles from the image using the proper tiling function
     const tiles = generateTilesFromImage(imageData, gridSize);
 
-    // Calculate tile size to perfectly fill canvas without gaps
-    // Tiles should fill entire canvas from corner to corner, no centering
-    const displayTileWidth = this.canvasWidth / gridSize;
-    const displayTileHeight = this.canvasHeight / gridSize;
+    // CRITICAL: Calculate tile size based on CANVAS dimensions to fill entire canvas
+    const tileWidth = this.canvasWidth / gridSize;
+    const tileHeight = this.canvasHeight / gridSize;
 
-    // Use full dimensions - tiles can be non-square to fill entire canvas
-    // This ensures zero gaps at edges
-    
+    // Use the tiles with their correct grid positions (gridX, gridY)
     for (const tile of tiles) {
-      // Calculate canvas position for this tile - place tiles in a grid covering full canvas
-      // No offset/centering - start from (0,0) and fill to edges
-      const tileLeft = tile.gridX * displayTileWidth;
-      const tileTop = tile.gridY * displayTileHeight;
-      const canvasX = tileLeft + displayTileWidth / 2;
-      const canvasY = tileTop + displayTileHeight / 2;
+      // Calculate tile position using the tile's actual grid coordinates
+      // This prevents the shifting/skewing issue
+      const canvasX = tile.gridX * tileWidth + tileWidth / 2;
+      const canvasY = tile.gridY * tileHeight + tileHeight / 2;
 
       const particle: Particle = {
         x: canvasX,
@@ -1566,13 +1795,12 @@ export class ParticleEngine {
         vx: 0,
         vy: 0,
         color: tile.color,
-        // Size for collision: use the larger dimension to ensure full collision coverage
-        size: Math.max(displayTileWidth, displayTileHeight) / 2,
+        size: Math.max(tileWidth, tileHeight) / 2,
         shape: 'square',
         visible: true,
         tileImageData: tile.imageData,
-        tileSize: displayTileWidth, // Store width for horizontal rendering
-        tileHeightSize: displayTileHeight, // Store height for vertical rendering
+        tileSize: tileWidth,
+        tileHeightSize: tileHeight,
         rotation: 0,
         healingMultiplier: 1.0,
       };
@@ -1580,7 +1808,7 @@ export class ParticleEngine {
       particles.push(particle);
     }
 
-    console.log(`Generated ${particles.length} tile particles in ${gridSize}x${gridSize} grid, tile size: ${displayTileWidth.toFixed(1)}x${displayTileHeight.toFixed(1)}px`);
+    console.log(`Generated ${particles.length} tile particles filling entire ${this.canvasWidth}x${this.canvasHeight} canvas with ${tileWidth.toFixed(1)}x${tileHeight.toFixed(1)} tiles`);
     return particles;
   }
 } 

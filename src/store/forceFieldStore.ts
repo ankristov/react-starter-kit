@@ -9,6 +9,7 @@ interface ForceFieldState {
   isAnimating: boolean;
   particleCount: number;
   desiredCanvasSize: { width: number; height: number } | null;
+  currentImageData: ImageData | null; // Store the current uploaded image data for refresh
   // Export/recording
   exportSettings: ExportSettings;
   isRecording: boolean;
@@ -42,6 +43,7 @@ interface ForceFieldState {
   setIsAnimating: (isAnimating: boolean) => void;
   setParticleCount: (count: number) => void;
   setDesiredCanvasSize: (size: { width: number; height: number } | null) => void;
+  setCurrentImageData: (imageData: ImageData | null) => void; // Store current uploaded image
   resetParticles: () => void;
   updateColorAnalysis: (colors: ColorInfo[]) => void; // Add method to update color analysis
   updateColorGroups: (groups: ColorGroup[]) => void; // Add method to update color groups
@@ -84,6 +86,10 @@ const defaultSettings: ForceFieldSettings = {
   healingFactor: 8,
   restorationForce: 30,
   wallsEnabled: true,
+  wallRepulsion: {
+    enabled: false,  // Only repel when particles hit with velocity
+    strength: 1.0,   // Repulsion force strength (0-5)
+  },
   canvasBackgroundColor: '#0f0f23',
   imageScale: 1,
   particleOpacity: 1.0,
@@ -227,6 +233,13 @@ const loadSettings = (fileHash?: string): ForceFieldSettings => {
     
     if (saved) {
       const parsed = JSON.parse(saved);
+      
+      // Restore background image data URL from session memory if available
+      if (parsed.backgroundImage && (window as any).__tempBackgroundImageDataUrl) {
+        parsed.backgroundImage.imageDataUrl = (window as any).__tempBackgroundImageDataUrl;
+        console.log('[Store] Background image dataUrl restored from session memory');
+      }
+      
       // Merge with defaults to handle any missing properties
       return { ...defaultSettings, ...parsed };
     }
@@ -272,7 +285,20 @@ const saveUIState = (desiredCanvasSize: { width: number; height: number } | null
 // Save control panel settings to localStorage (file-specific or global)
 const saveControlSettings = (settings: ForceFieldSettings, fileHash?: string) => {
   try {
+    // If backgroundImage has imageDataUrl, store it in session storage (not localStorage)
+    // because imageDataUrl can be huge (>5MB) and exceed localStorage limits
+    if (settings.backgroundImage?.imageDataUrl) {
+      (window as any).__tempBackgroundImageDataUrl = settings.backgroundImage.imageDataUrl;
+      console.log('[Store] Background image dataUrl stored in session memory');
+    }
+
     // Extract only control panel settings (no particles or other large data)
+    // IMPORTANT: Don't store imageDataUrl in localStorage - it's too large
+    const backgroundImageForStorage = settings.backgroundImage ? {
+      ...settings.backgroundImage,
+      imageDataUrl: undefined, // Don't persist the huge dataUrl to localStorage
+    } : null;
+
     const controlSettings: ControlPanelSettings = {
       particleDensity: settings.particleDensity,
       particleShape: settings.particleShape,
@@ -287,7 +313,7 @@ const saveControlSettings = (settings: ForceFieldSettings, fileHash?: string) =>
       canvasBackgroundColor: settings.canvasBackgroundColor,
       imageScale: settings.imageScale,
       particleOpacity: settings.particleOpacity,
-      backgroundImage: settings.backgroundImage,
+      backgroundImage: backgroundImageForStorage as any,
       colorFilterSettings: settings.colorFilterSettings,
       performance: settings.performance,
       partialHealing: settings.partialHealing,
@@ -300,10 +326,21 @@ const saveControlSettings = (settings: ForceFieldSettings, fileHash?: string) =>
     localStorage.setItem(key, JSON.stringify(controlSettings));
   } catch (error) {
     console.warn('Failed to save control settings to localStorage:', error);
-    // Try to clear old data and save again
+    // Try to clear old data and save again, but still keep imageDataUrl in session
     try {
       const key = fileHash ? `forcefield-controls-${fileHash}` : 'forcefield-controls';
       localStorage.removeItem(key);
+
+      // If backgroundImage has imageDataUrl, store it in session storage
+      if (settings.backgroundImage?.imageDataUrl) {
+        (window as any).__tempBackgroundImageDataUrl = settings.backgroundImage.imageDataUrl;
+      }
+
+      const backgroundImageForStorage = settings.backgroundImage ? {
+        ...settings.backgroundImage,
+        imageDataUrl: undefined, // Don't persist the huge dataUrl to localStorage
+      } : null;
+
       const controlSettings: ControlPanelSettings = {
         particleDensity: settings.particleDensity,
         particleShape: settings.particleShape,
@@ -315,20 +352,24 @@ const saveControlSettings = (settings: ForceFieldSettings, fileHash?: string) =>
         healingFactor: settings.healingFactor,
         restorationForce: settings.restorationForce,
         wallsEnabled: settings.wallsEnabled,
-      canvasBackgroundColor: settings.canvasBackgroundColor,
-      imageScale: settings.imageScale,
-      particleOpacity: settings.particleOpacity,
-      backgroundImage: settings.backgroundImage,
-      colorFilterSettings: settings.colorFilterSettings,
-      performance: settings.performance,
-      partialHealing: settings.partialHealing,
-      visual: settings.visual,
-      collisions: settings.collisions,
-      particleInteraction: settings.particleInteraction,
+        canvasBackgroundColor: settings.canvasBackgroundColor,
+        imageScale: settings.imageScale,
+        particleOpacity: settings.particleOpacity,
+        backgroundImage: backgroundImageForStorage as any,
+        colorFilterSettings: settings.colorFilterSettings,
+        performance: settings.performance,
+        partialHealing: settings.partialHealing,
+        visual: settings.visual,
+        collisions: settings.collisions,
+        particleInteraction: settings.particleInteraction,
       };
       localStorage.setItem(key, JSON.stringify(controlSettings));
     } catch (retryError) {
       console.warn('Failed to save control settings even after clearing:', retryError);
+      // Still store the dataUrl in session memory for this session
+      if (settings.backgroundImage?.imageDataUrl) {
+        (window as any).__tempBackgroundImageDataUrl = settings.backgroundImage.imageDataUrl;
+      }
     }
   }
 };
@@ -343,6 +384,7 @@ export const useForceFieldStore = create<ForceFieldState>((set, get) => ({
   isAnimating: false,
   particleCount: 0,
   desiredCanvasSize: initialUIState.desiredCanvasSize,
+  currentImageData: null, // Store current uploaded image data
   exportSettings: initialUIState.exportSettings,
   isRecording: false,
   recordingUrl: null,
@@ -401,6 +443,7 @@ export const useForceFieldStore = create<ForceFieldState>((set, get) => ({
     set({ desiredCanvasSize: size });
     saveUIState(size, get().exportSettings);
   },
+  setCurrentImageData: (imageData: ImageData | null) => set({ currentImageData: imageData }),
   resetParticles: () => set((state) => ({
     particles: state.particles.map(particle => ({
       ...particle,
@@ -567,6 +610,8 @@ export const useForceFieldStore = create<ForceFieldState>((set, get) => ({
       healingFactor: state.settings.healingFactor,
       restorationForce: state.settings.restorationForce,
       wallsEnabled: state.settings.wallsEnabled,
+      wallRepulsion: state.settings.wallRepulsion,
+      wallMode: state.settings.wallMode,
       canvasBackgroundColor: state.settings.canvasBackgroundColor,
       imageScale: state.settings.imageScale,
       particleOpacity: state.settings.particleOpacity,
@@ -577,6 +622,10 @@ export const useForceFieldStore = create<ForceFieldState>((set, get) => ({
       visual: state.settings.visual,
       collisions: state.settings.collisions,
       particleInteraction: state.settings.particleInteraction,
+      animationMode: state.settings.animationMode,
+      gridSize: state.settings.gridSize,
+      motionResistance: state.settings.motionResistance,
+      damping: state.settings.damping,
     };
     
     const defaultState: DefaultState = {

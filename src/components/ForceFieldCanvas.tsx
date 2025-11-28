@@ -5,6 +5,7 @@ import { createDefaultImage } from '../lib/imageUtils';
 import { useFps } from '../hooks/useFps';
 import { eventRecorder } from '../lib/eventRecorder';
 import { Button } from './ui/button';
+import { Play, Pause, Circle, Camera, RotateCcw } from 'lucide-react';
 
 export function ForceFieldCanvas() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -43,6 +44,7 @@ export function ForceFieldCanvas() {
     currentPulseConfig,
     enqueuePulse,
     continuousForcePulseId,
+    currentImageData,
   } = useForceFieldStore();
 
   // Initialize particle engine (run once)
@@ -90,6 +92,16 @@ export function ForceFieldCanvas() {
 
     // Apply initial color filtering
     engine.applyColorFiltering();
+
+    // Force initial draw of particles
+    canvas.width = canvasSize.width;
+    canvas.height = canvasSize.height;
+    ctx.fillStyle = settings.canvasBackgroundColor;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.save();
+    ctx.globalAlpha = settings.particleOpacity;
+    engine.drawParticles(ctx);
+    ctx.restore();
 
     // Start animation immediately and keep it running
     setIsAnimating(true);
@@ -336,24 +348,55 @@ export function ForceFieldCanvas() {
       // Ensure settings are up to date before updating particles
       engineRef.current.updateSettings(settings);
       engineRef.current.updateParticlesFromStore(particles);
+      
+      // Force an immediate draw of updated particles
+      if (canvasRef.current) {
+        const canvas = canvasRef.current;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          // Update canvas dimensions if they've changed
+          const targetSize = desiredCanvasSize || canvasSize;
+          if (canvas.width !== targetSize.width || canvas.height !== targetSize.height) {
+            canvas.width = targetSize.width;
+            canvas.height = targetSize.height;
+          }
+          
+          // Clear and draw particles immediately
+          const currentSettings = settings;
+          ctx.fillStyle = currentSettings.canvasBackgroundColor;
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          
+          ctx.save();
+          ctx.globalAlpha = currentSettings.particleOpacity;
+          engineRef.current.drawParticles(ctx);
+          ctx.restore();
+        }
+      }
     }
   }, [particles, desiredCanvasSize, canvasSize, settings]);
 
   // Cache background image when data URL changes
+  // Watch both the settings AND any session-stored imageDataUrl
   useEffect(() => {
-    if (settings.backgroundImage?.imageDataUrl) {
+    // First try to use the stored imageDataUrl, then fall back to temporary window reference
+    const imageDataUrl = settings.backgroundImage?.imageDataUrl || (typeof window !== 'undefined' ? (window as any).__tempBackgroundImageDataUrl : null);
+    
+    if (imageDataUrl) {
       const img = new Image();
       img.onload = () => {
+        console.log('[Canvas] Background image loaded successfully');
         backgroundImageRef.current = img;
       };
       img.onerror = () => {
+        console.error('[Canvas] Failed to load background image');
         backgroundImageRef.current = null;
       };
-      img.src = settings.backgroundImage.imageDataUrl;
+      img.src = imageDataUrl;
     } else {
       backgroundImageRef.current = null;
     }
-  }, [settings.backgroundImage?.imageDataUrl]);
+  }, [settings.backgroundImage]);
+
 
   // Keyboard event handlers for hotkey functionality
   const handleKeyDown = useCallback((event: KeyboardEvent) => {
@@ -466,11 +509,14 @@ export function ForceFieldCanvas() {
       ctx.rotate((currentSettings.backgroundImage.rotation * Math.PI) / 180);
       ctx.scale(currentSettings.backgroundImage.scale, currentSettings.backgroundImage.scale);
       
-      // Calculate draw dimensions - use original dimensions as fallback for non-squared images
-      const drawWidth = currentSettings.backgroundImage.width ?? currentSettings.backgroundImage.originalWidth ?? img.width;
-      const drawHeight = currentSettings.backgroundImage.height ?? currentSettings.backgroundImage.originalHeight ?? img.height;
+      // CRITICAL: Always use original dimensions to ensure perfect alignment with tiles
+      // The originalWidth/originalHeight represent the actual image dimensions
+      // Any other "width"/"height" value is ignored - we use the source image dimensions
+      const drawWidth = currentSettings.backgroundImage.originalWidth ?? img.width;
+      const drawHeight = currentSettings.backgroundImage.originalHeight ?? img.height;
       
-      // Draw from center
+      // Draw from center - this creates perfect alignment with particle tiles
+      // Tiles also use the same originalWidth/originalHeight for their calculations
       ctx.drawImage(img, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight);
       ctx.restore();
     }
@@ -616,6 +662,22 @@ export function ForceFieldCanvas() {
     lastStoreUpdateRef.current = performance.now();
   }, []);
 
+  const handleSnapshot = useCallback(() => {
+    if (!canvasRef.current) return;
+    
+    // Get canvas image data
+    const canvas = canvasRef.current;
+    const imageData = canvas.toDataURL('image/png');
+    
+    // Create temporary link and trigger download
+    const link = document.createElement('a');
+    link.href = imageData;
+    link.download = `forcefield-snapshot-${Date.now()}.png`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  }, []);
+
   const handleCanvasClick = useCallback(() => {
     // Focus the canvas when clicked to enable keyboard events
     if (canvasRef.current) {
@@ -657,67 +719,143 @@ export function ForceFieldCanvas() {
         </div>
       </div>
 
-      {/* Compact Animate & Record buttons in bottom-right corner */}
-      <div className="absolute bottom-4 right-4 flex gap-2">
-        <Button
-          size="sm"
-          className={`w-10 h-10 p-0 flex items-center justify-center rounded border ${
-            currentPulseConfig?.mode === 'continuous' && continuousForcePulseId
-              ? 'bg-cyan-600/70 hover:bg-cyan-600/80 text-cyan-100 border-cyan-400/30'
-              : 'bg-purple-600/50 hover:bg-purple-600/70 text-purple-100 border-purple-400/30'
-          }`}
-          title={currentPulseConfig?.mode === 'continuous' ? (continuousForcePulseId ? 'Stop Continuous Force' : 'Start Continuous Force') : 'Animate (trigger current force pulse)'}
-          onClick={() => {
-            const state = useForceFieldStore.getState();
-            const { continuousForcePulseId, setContinuousForcePulse } = state;
-            
-            // Handle continuous mode
-            if (currentPulseConfig?.mode === 'continuous') {
-              if (continuousForcePulseId) {
-                // Stop continuous force
-                setContinuousForcePulse(null);
+      {/* Action buttons in grid layout - bottom-right corner */}
+      <div className="absolute bottom-4 right-4">
+        <div className="grid grid-cols-2 gap-2">
+          {/* Animate Button */}
+          <Button
+            size="sm"
+            className={`w-12 h-12 p-0 flex items-center justify-center rounded border transition-all ${
+              currentPulseConfig?.mode === 'continuous'
+                ? (continuousForcePulseId
+                    ? 'bg-cyan-600/70 hover:bg-cyan-600/80 text-cyan-100 border-cyan-400/40 animate-pulse'
+                    : 'bg-cyan-600/40 hover:bg-cyan-600/50 text-cyan-100 border-cyan-400/20')
+                : 'bg-purple-600/50 hover:bg-purple-600/70 text-purple-100 border-purple-400/30'
+            }`}
+            title={currentPulseConfig?.mode === 'continuous' ? (continuousForcePulseId ? 'Stop Continuous Force' : 'Start Continuous Force') : 'Animate (trigger current force pulse)'}
+            onClick={() => {
+              const state = useForceFieldStore.getState();
+              const { continuousForcePulseId, setContinuousForcePulse } = state;
+              
+              // Handle continuous mode
+              if (currentPulseConfig?.mode === 'continuous') {
+                if (continuousForcePulseId) {
+                  // Stop continuous force
+                  if (engineRef.current) {
+                    engineRef.current.removeContinuousPulse(continuousForcePulseId);
+                  }
+                  setContinuousForcePulse(null);
+                } else {
+                  // Start continuous force
+                  const pulseId = `continuous-${Date.now()}`;
+                  setContinuousForcePulse(pulseId);
+                  if (engineRef.current && currentPulseConfig) {
+                    const pulse = { ...currentPulseConfig };
+                    delete (pulse as any).id;
+                    delete (pulse as any).mode;
+                    engineRef.current.setContinuousPulse(pulseId, pulse);
+                  }
+                }
               } else {
-                // Start continuous force
-                const pulseId = `continuous-${Date.now()}`;
-                setContinuousForcePulse(pulseId);
-                const pulse = { ...currentPulseConfig, id: pulseId };
-                enqueuePulse(pulse);
+                // Impulse mode
+                enqueuePulse(currentPulseConfig);
               }
-            } else {
-              // Impulse mode
-              enqueuePulse(currentPulseConfig);
-            }
-          }}
-        >
-          {currentPulseConfig?.mode === 'continuous' ? (continuousForcePulseId ? '⏹' : '▶') : '✨'}
-        </Button>
-        <Button
-          size="sm"
-          className={`w-10 h-10 p-0 flex items-center justify-center rounded border ${ 
-            isRecording
-              ? 'bg-red-600/70 hover:bg-red-600/80 text-red-100 border-red-400/30'
-              : 'bg-green-600/70 hover:bg-green-600/80 text-green-100 border-green-400/30'
-          }`}
-          title={isRecording ? 'Stop Recording' : 'Start Recording'}
-          onClick={() => {
-            if (!isRecording) {
-              const { preset, width, height } = exportSettings;
-              let w = width, h = height;
-              if (preset !== 'custom') {
-                if (preset === 'instagramReel') { w = 1080; h = 1920; }
-                if (preset === 'youtube') { w = 1920; h = 1080; }
-                if (preset === 'square') { w = 1080; h = 1080; }
-                const img = useForceFieldStore.getState().particles?.[0];
+            }}
+          >
+            {currentPulseConfig?.mode === 'continuous' && continuousForcePulseId ? (
+              <Pause className="w-5 h-5" />
+            ) : (
+              <Play className="w-5 h-5" />
+            )}
+          </Button>
+
+          {/* Snapshot Button */}
+          <Button
+            size="sm"
+            className="w-12 h-12 p-0 flex items-center justify-center rounded border bg-blue-600/70 hover:bg-blue-600/80 text-blue-100 border-blue-400/30"
+            title="Take Snapshot"
+            onClick={handleSnapshot}
+          >
+            <Camera className="w-5 h-5" />
+          </Button>
+
+          {/* Record Button */}
+          <Button
+            size="sm"
+            className={`w-12 h-12 p-0 flex items-center justify-center rounded border ${ 
+              isRecording
+                ? 'bg-red-600/70 hover:bg-red-600/80 text-red-100 border-red-400/30'
+                : 'bg-green-600/70 hover:bg-green-600/80 text-green-100 border-green-400/30'
+            }`}
+            title={isRecording ? 'Stop Recording' : 'Start Recording'}
+            onClick={() => {
+              if (!isRecording) {
+                const { preset, width, height } = exportSettings;
+                let w = width, h = height;
+                if (preset !== 'custom') {
+                  if (preset === 'instagramReel') { w = 1080; h = 1920; }
+                  if (preset === 'youtube') { w = 1920; h = 1080; }
+                  if (preset === 'square') { w = 1080; h = 1080; }
+                  const img = useForceFieldStore.getState().particles?.[0];
+                }
+                setDesiredCanvasSize({ width: w, height: h });
+                useForceFieldStore.getState().startRecording();
+              } else {
+                useForceFieldStore.getState().stopRecording();
               }
-              setDesiredCanvasSize({ width: w, height: h });
-              useForceFieldStore.getState().startRecording();
-            } else {
-              useForceFieldStore.getState().stopRecording();
-            }
-          }}
-        >
-          <span className={isRecording ? '🔴' : '⚫'} />
-        </Button>
+            }}
+          >
+            {isRecording ? (
+              <Circle className="w-5 h-5 fill-current" />
+            ) : (
+              <Circle className="w-5 h-5" />
+            )}
+          </Button>
+
+          {/* Refresh Button */}
+          <Button
+            size="sm"
+            className="w-12 h-12 p-0 flex items-center justify-center rounded border bg-amber-600/70 hover:bg-amber-600/80 text-amber-100 border-amber-400/30"
+            title="Refresh Forcefield"
+            onClick={() => {
+              // Regenerate particles from the current uploaded image to fill the entire canvas
+              if (engineRef.current && currentImageData) {
+                try {
+                  // Get current settings to check animation mode
+                  const currentSettings = settings;
+                  
+                  // Generate particles based on current animation mode
+                  let newParticles;
+                  if (currentSettings.animationMode === 'imageCrops') {
+                    // Use image crop tiles mode
+                    newParticles = engineRef.current.generateParticlesFromImageTiles(
+                      currentImageData, 
+                      currentSettings.imageCropGridSize ?? 16, 
+                      currentSettings.backgroundImage
+                    );
+                  } else {
+                    // Use regular particles mode
+                    newParticles = engineRef.current.generateParticlesFromImage(
+                      currentImageData, 
+                      currentSettings.backgroundImage
+                    );
+                  }
+                  
+                  // Update the store with new particles
+                  setParticles(newParticles);
+                  setParticleCount(newParticles.length);
+                  
+                  // Apply any active color filtering to the new particles
+                  engineRef.current.applyColorFiltering();
+                } catch (error) {
+                  console.error('Error refreshing particles:', error);
+                }
+              }
+            }}
+          >
+            <RotateCcw className="w-5 h-5" />
+          </Button>
+        </div>
       </div>
     </div>
   );
