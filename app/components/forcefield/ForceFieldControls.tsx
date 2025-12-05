@@ -104,8 +104,13 @@ export function ForceFieldControls() {
               <Button
                 variant="outline"
                 size="sm"
-                onClick={resetParticles}
+                onClick={() => {
+                  // Reset particles to original positions
+                  resetParticles();
+                  console.log('[Reset Button] Particles reset to original positions');
+                }}
                 className="bg-blue-900/50 border-blue-500/50 text-blue-200 hover:bg-blue-800"
+                title="Reset particles to original positions"
               >
                 <RotateCcw className="w-4 h-4" />
               </Button>

@@ -23,13 +23,17 @@ export interface TileGridConfig {
 
 /**
  * Generate tiles from an image
- * Creates ALWAYS SQUARE tiles based on the shortest dimension
- * Grid size = number of cells in the shortest dimension
- * Tile sizes are adjusted so they fit PERFECTLY without gaps using integer math
+ * Tile size and grid are calculated based on CANVAS dimensions, not image dimensions
+ * - Grid size applies to the shortest canvas dimension
+ * - Tile size = shortestCanvasDim / gridSize (floor)
+ * - All tiles are square except for remainder in last row/column which fill gaps
+ * - Image is scaled to canvas size during particle creation
  */
 export function generateTilesFromImage(
   imageData: ImageData,
-  gridSize: number
+  gridSize: number,
+  canvasWidth?: number,
+  canvasHeight?: number
 ): ImageTile[] {
   const { width: imgWidth, height: imgHeight } = imageData;
   const tiles: ImageTile[] = [];
@@ -39,52 +43,78 @@ export function generateTilesFromImage(
     return tiles;
   }
 
-  // Grid size applies to the SHORTEST dimension
-  const shortestDim = Math.min(imgWidth, imgHeight);
+  // Use provided canvas dimensions, or fall back to image dimensions
+  const canvasW = canvasWidth || imgWidth;
+  const canvasH = canvasHeight || imgHeight;
+
+  // Grid size applies to the SHORTEST canvas dimension
+  const shortestCanvasDim = Math.min(canvasW, canvasH);
+  const longestCanvasDim = Math.max(canvasW, canvasH);
+  const isCanvasWiderThanTall = canvasW >= canvasH;
   
-  // Calculate tile size for the shortest dimension (round down)
-  const baseTileSize = Math.max(1, Math.floor(shortestDim / gridSize));
+  // Calculate tile size based on canvas shortest dimension (floor division)
+  const tileSize = Math.max(1, Math.floor(shortestCanvasDim / gridSize));
   
-  // Calculate how many tiles we need in each dimension
-  const tilesWide = Math.ceil(imgWidth / baseTileSize);
-  const tilesTall = Math.ceil(imgHeight / baseTileSize);
+  // Calculate number of tiles in each dimension
+  // Shortest dimension gets exactly gridSize tiles
+  // Longest dimension gets ceil(longestDim / tileSize) tiles to fill completely
+  const tilesInShortestDim = gridSize;
+  const tilesInLongestDim = Math.ceil(longestCanvasDim / tileSize);
   
-  // Use the maximum to ensure all tiles are square
-  const squareTileSize = Math.max(
-    Math.ceil(imgWidth / tilesWide),
-    Math.ceil(imgHeight / tilesTall)
-  );
+  const tilesWide = isCanvasWiderThanTall ? tilesInLongestDim : tilesInShortestDim;
+  const tilesTall = isCanvasWiderThanTall ? tilesInShortestDim : tilesInLongestDim;
 
   console.log(
-    `[ImageTiler] Creating square crops from ${imgWidth}x${imgHeight} image`,
-    `Grid size: ${gridSize}, base tile: ${baseTileSize}px`,
-    `Square tile size: ${squareTileSize}px, Grid: ${tilesWide}x${tilesTall}`
+    `[ImageTiler] Creating tile crops from ${imgWidth}x${imgHeight} image for ${canvasW}x${canvasH} canvas`,
+    `Grid size: ${gridSize}, tile size: ${tileSize}px`,
+    `Grid: ${tilesWide}x${tilesTall} (${tilesWide * tilesTall} total tiles)`
   );
 
   for (let row = 0; row < tilesTall; row++) {
     for (let col = 0; col < tilesWide; col++) {
-      // Calculate tile boundaries
-      // Use simple grid positioning: each tile gets squareTileSize pixels
-      // except the last tile in each dimension which extends to the image boundary
-      const pixelXStart = col * squareTileSize;
-      const pixelYStart = row * squareTileSize;
+      // Calculate canvas positions for this tile
+      // Tiles are positioned on the canvas grid (not image grid)
+      const canvasXStart = col * tileSize;
+      const canvasYStart = row * tileSize;
       
-      // Last column extends to image right edge, others get full tile size
-      const pixelXEnd = col === tilesWide - 1 ? imgWidth : Math.min((col + 1) * squareTileSize, imgWidth);
-      // Last row extends to image bottom edge, others get full tile size
-      const pixelYEnd = row === tilesTall - 1 ? imgHeight : Math.min((row + 1) * squareTileSize, imgHeight);
+      // Calculate canvas end position (with remainders for last row/col)
+      let canvasXEnd = (col + 1) * tileSize;
+      let canvasYEnd = (row + 1) * tileSize;
       
-      // Clamp to valid bounds
-      const startX = Math.max(0, Math.min(pixelXStart, imgWidth - 1));
-      const startY = Math.max(0, Math.min(pixelYStart, imgHeight - 1));
-      const endX = Math.max(startX + 1, Math.min(pixelXEnd, imgWidth));
-      const endY = Math.max(startY + 1, Math.min(pixelYEnd, imgHeight));
+      // Last column might be narrower to exactly fill canvas width
+      if (col === tilesWide - 1) {
+        canvasXEnd = canvasW;
+      }
       
-      const tileWidth = endX - startX;
-      const tileHeight = endY - startY;
+      // Last row might be shorter to exactly fill canvas height
+      if (row === tilesTall - 1) {
+        canvasYEnd = canvasH;
+      }
+      
+      const canvasTileWidth = canvasXEnd - canvasXStart;
+      const canvasTileHeight = canvasYEnd - canvasYStart;
+      
+      // Map canvas tile positions to image coordinates
+      // Scale image to fit canvas
+      const scaleX = imgWidth / canvasW;
+      const scaleY = imgHeight / canvasH;
+      
+      const imageXStart = Math.floor(canvasXStart * scaleX);
+      const imageYStart = Math.floor(canvasYStart * scaleY);
+      const imageXEnd = Math.ceil(canvasXEnd * scaleX);
+      const imageYEnd = Math.ceil(canvasYEnd * scaleY);
+      
+      // Clamp to image bounds
+      const startX = Math.max(0, Math.min(imageXStart, imgWidth - 1));
+      const startY = Math.max(0, Math.min(imageYStart, imgHeight - 1));
+      const endX = Math.max(startX + 1, Math.min(imageXEnd, imgWidth));
+      const endY = Math.max(startY + 1, Math.min(imageYEnd, imgHeight));
+      
+      const tileImageWidth = endX - startX;
+      const tileImageHeight = endY - startY;
 
-      if (tileWidth <= 0 || tileHeight <= 0) {
-        console.warn(`[ImageTiler] Skipping invalid tile at [${row},${col}]: ${tileWidth}x${tileHeight}`);
+      if (tileImageWidth <= 0 || tileImageHeight <= 0) {
+        console.warn(`[ImageTiler] Skipping invalid tile at grid [${row},${col}]: image size ${tileImageWidth}x${tileImageHeight}`);
         continue;
       }
 
@@ -93,8 +123,8 @@ export function generateTilesFromImage(
         imageData,
         startX,
         startY,
-        tileWidth,
-        tileHeight
+        tileImageWidth,
+        tileImageHeight
       );
 
       const avgColor = calculateAverageColor(tileImageData);
@@ -103,9 +133,9 @@ export function generateTilesFromImage(
         id: `tile-${row}-${col}`,
         gridX: col,
         gridY: row,
-        pixelX: startX,  // Store the ACTUAL pixel position where tile was extracted
-        pixelY: startY,
-        tileSize: squareTileSize,
+        pixelX: canvasXStart,  // Store canvas position (not image position)
+        pixelY: canvasYStart,
+        tileSize: canvasTileWidth,  // Store actual canvas tile width (may be partial in last column)
         imageData: tileImageData,
         color: avgColor,
       };
@@ -117,7 +147,7 @@ export function generateTilesFromImage(
   console.log(`[ImageTiler] Generated ${tiles.length} tiles (expected ${tilesWide * tilesTall})`);
   
   if (tiles.length === 0) {
-    console.error(`[ImageTiler] ERROR: No tiles generated! Image: ${imgWidth}x${imgHeight}, GridSize: ${gridSize}, BaseTile: ${baseTileSize}, Grid: ${tilesWide}x${tilesTall}`);
+    console.error(`[ImageTiler] ERROR: No tiles generated! Canvas: ${canvasW}x${canvasH}, GridSize: ${gridSize}, TileSize: ${tileSize}, Grid: ${tilesWide}x${tilesTall}`);
   }
   
   return tiles;

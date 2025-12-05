@@ -380,69 +380,28 @@ export function ControlPanel() {
       const engine = new ParticleEngine(settings);
       engine.setCanvasSize(imageData.width, imageData.height);
       
-      // Build background image object first (synchronously using the file data URL)
-      const imageDataUrl = await new Promise<string>((resolve) => {
-        const reader = new FileReader();
-        reader.onload = (event) => {
-          resolve(event.target?.result as string);
-        };
-        reader.readAsDataURL(file);
-      });
-
-      // Create background image object for PARTICLE GENERATION (with imageDataUrl)
-      const backgroundImageObjForParticles = {
-        imageDataUrl: imageDataUrl,
-        scale: 1.0,
-        positionX: 0,
-        positionY: 0,
-        width: imageData.width,
-        height: imageData.height,
-        rotation: 0,
-        aspectRatioLock: true,
-        originalWidth: imageData.width,
-        originalHeight: imageData.height,
-      };
-
-      // Create background image object for STORAGE (WITH imageDataUrl for display, but we'll manage it carefully)
-      const backgroundImageObjForStorage = {
-        imageDataUrl: imageDataUrl,
-        scale: 1.0,
-        positionX: 0,
-        positionY: 0,
-        width: imageData.width,
-        height: imageData.height,
-        rotation: 0,
-        aspectRatioLock: true,
-        originalWidth: imageData.width,
-        originalHeight: imageData.height,
-      };
-
-      // Generate particles based on animation mode - use the version WITH imageDataUrl
+      // Generate particles based on animation mode
+      // Use current background image settings if available (so particles align with any existing background)
       console.log('[Upload] Current animation mode:', settings.animationMode);
       let particles;
       if (settings.animationMode === 'imageCrops') {
-        particles = engine.generateParticlesFromImageTiles(imageData, settings.imageCropGridSize ?? 16, backgroundImageObjForParticles);
+        particles = engine.generateParticlesFromImageTiles(imageData, settings.imageCropGridSize ?? 16, settings.backgroundImage);
         console.log('Generated tile particles with grid size:', settings.imageCropGridSize ?? 16, 'particles:', particles.length);
       } else {
-        particles = engine.generateParticlesFromImage(imageData, backgroundImageObjForParticles);
+        particles = engine.generateParticlesFromImage(imageData, settings.backgroundImage);
         console.log('Generated particles (regular mode):', particles.length);
       }
       
-      // Now update the store with background image and particles
-      setBackgroundImage(backgroundImageObjForStorage);
-      
-      // Also set the full version in a temporary reference so the canvas can use it
-      // This will be available until the next reload, which is fine for display purposes
-      if (typeof window !== 'undefined') {
-        (window as any).__tempBackgroundImageDataUrl = imageDataUrl;
-      }
+      // FIXED: Update store with particles ONLY - do NOT set background image when uploading target image
+      // The target image is for particles, not background
+      // Background image should only be set through the dedicated "Upload Background Image" button
       
       // Update store with new particles
       setParticles(particles);
       setParticleCount(particles.length);
       setCurrentImageData(imageData); // Store the uploaded image for canvas refresh
       
-      console.log('Image loaded successfully:', particles.length, 'particles');
+      console.log('Target image uploaded successfully:', particles.length, 'particles. Background image NOT changed.');
     } catch (error) {
       console.error('Error loading image:', error);
       const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
@@ -638,7 +597,6 @@ export function ControlPanel() {
       {/* Top action bar - scrollable */}
       <div className="border-b border-purple-500/20">
         <div className="p-3 flex gap-2 text-xs overflow-x-auto whitespace-nowrap pb-4">
-          <Button size="sm" className="bg-gradient-to-r from-fuchsia-600/40 to-cyan-500/40 hover:from-fuchsia-600/60 hover:to-cyan-500/60 text-white/90 border border-white/10 flex-shrink-0" onClick={() => fileInputRef.current?.click()}>Upload</Button>
           <Button size="sm" className="bg-indigo-600/30 hover:bg-indigo-600/45 text-indigo-100 border border-indigo-400/20 flex-shrink-0" onClick={async () => {
               const result = await loadDefaultState();
               if (result.success) {
@@ -701,7 +659,42 @@ export function ControlPanel() {
               }
             </div>
             {openSections.main && (
-            <div className="bg-slate-900/60 border border-slate-700/60 rounded-lg p-3">
+            <div className="bg-slate-900/60 border border-slate-700/60 rounded-lg p-3 space-y-4">
+              
+              {/* Image Upload Subsection */}
+              <div className="bg-slate-800/50 border border-slate-700/40 rounded p-3">
+                <h5 className="text-xs uppercase tracking-wider text-cyan-300/80 mb-3 font-semibold">Image Upload</h5>
+                <div className="space-y-3">
+                  <button
+                    onClick={() => fileInputRef.current?.click()}
+                    className="w-full py-2 px-3 bg-gradient-to-r from-cyan-600/40 to-purple-600/40 hover:from-cyan-600/60 hover:to-purple-600/60 text-white/90 border border-cyan-400/30 rounded text-sm font-medium transition-all"
+                  >
+                    {currentImageDataRef.current ? '📷 Change Image' : '📷 Upload Image'}
+                  </button>
+                  
+                  {currentImageDataRef.current && (
+                    <div className="bg-slate-700/30 rounded p-2 space-y-1">
+                      <div className="flex justify-between items-center">
+                        <span className="text-xs text-purple-300/70">Dimensions:</span>
+                        <span className="text-xs font-mono text-cyan-300">{currentImageDataRef.current.width} × {currentImageDataRef.current.height}</span>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="text-xs text-purple-300/70">Aspect Ratio:</span>
+                        <span className="text-xs font-mono text-cyan-300">
+                          {(currentImageDataRef.current.width / currentImageDataRef.current.height).toFixed(2)}:1
+                        </span>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="text-xs text-purple-300/70">Total Pixels:</span>
+                        <span className="text-xs font-mono text-cyan-300">
+                          {(currentImageDataRef.current.width * currentImageDataRef.current.height / 1_000_000).toFixed(2)}M
+                        </span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+
               {/* Animation Mode Selector - Beautiful Cards */}
               <div className="mb-4">
                 <label className="block text-xs text-purple-300/80 mb-2">Animation Mode</label>
@@ -1135,15 +1128,22 @@ export function ControlPanel() {
                     className="hidden"
                     onChange={async (e) => {
                       const file = e.target.files?.[0];
-                      if (!file) return;
+                      if (!file) {
+                        console.log('[BackgroundImage] No file selected');
+                        return;
+                      }
+                      
+                      console.log('[BackgroundImage] Starting background image upload:', file.name, file.size, file.type);
                       
                       try {
                         const reader = new FileReader();
                         reader.onload = (event) => {
                           const dataUrl = event.target?.result as string;
+                          console.log('[BackgroundImage] File read successfully, loading as image');
                           const img = new Image();
                           img.onload = () => {
-                            setBackgroundImage({
+                            console.log('[BackgroundImage] Image loaded:', img.width, 'x', img.height);
+                            const backgroundSettings = {
                               imageDataUrl: dataUrl,
                               scale: 1.0,
                               positionX: 0,
@@ -1154,17 +1154,36 @@ export function ControlPanel() {
                               aspectRatioLock: true,
                               originalWidth: img.width,
                               originalHeight: img.height,
-                            });
+                            };
+                            console.log('[BackgroundImage] Setting background image:', backgroundSettings);
+                            setBackgroundImage(backgroundSettings);
+                            
+                            // Also store in session memory for canvas rendering
+                            if (typeof window !== 'undefined') {
+                              (window as any).__tempBackgroundImageDataUrl = dataUrl;
+                              console.log('[BackgroundImage] Stored dataUrl in session memory');
+                            }
+                            
                             setShowBackgroundAdjustments(true);
+                            console.log('[BackgroundImage] Background image set successfully');
+                          };
+                          img.onerror = () => {
+                            console.error('[BackgroundImage] Failed to load image - invalid image format or corrupted file');
+                            alert('Failed to load background image. Please check the file format.');
+                            backgroundImageInputRef.current!.value = '';
                           };
                           img.src = dataUrl;
                         };
                         reader.onerror = () => {
-                          console.error('Failed to read background image file');
+                          console.error('[BackgroundImage] Failed to read file');
+                          alert('Failed to read background image file.');
+                          backgroundImageInputRef.current!.value = '';
                         };
                         reader.readAsDataURL(file);
                       } catch (error) {
-                        console.error('Error loading background image:', error);
+                        console.error('[BackgroundImage] Unexpected error:', error);
+                        alert('An error occurred while loading the background image.');
+                        backgroundImageInputRef.current!.value = '';
                       }
                     }}
                   />
@@ -1807,6 +1826,11 @@ export function ControlPanel() {
                     <span className="text-purple-300/70 text-xs">x</span>
                     <input type="number" value={exportSettings.height} min={100} onChange={(e)=>setExportSettings({ height: Number(e.target.value) })} className="w-28 h-8 px-2 bg-slate-800 border border-slate-700 rounded text-purple-200 text-xs disabled:opacity-50" disabled={exportSettings.preset !== 'custom'} />
                   </div>
+                  {exportSettings.preset === 'original' && currentImageDataRef.current && (
+                    <div className="text-xs text-cyan-300/80 bg-slate-700/30 rounded px-2 py-1">
+                      Real dimensions: {currentImageDataRef.current.width} × {currentImageDataRef.current.height}
+                    </div>
+                  )}
                   <div className="flex items-center gap-2">
                     <label className="text-xs text-purple-300/80">FPS</label>
                     <input type="number" value={exportSettings.fps} min={1} max={120} onChange={(e)=>setExportSettings({ fps: Number(e.target.value) })} className="w-20 h-8 px-2 bg-slate-800 border border-slate-700 rounded text-purple-200 text-xs" />

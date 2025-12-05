@@ -339,39 +339,24 @@ export function ForceFieldCanvas() {
   // Update particles when they change in store
   useEffect(() => {
     if (engineRef.current && particles.length > 0) {
-      // Ensure canvas size is set before updating particles
-      if (desiredCanvasSize) {
-        engineRef.current.setCanvasSize(desiredCanvasSize.width, desiredCanvasSize.height);
-      } else {
-        engineRef.current.setCanvasSize(canvasSize.width, canvasSize.height);
+      // Get target canvas size
+      const targetSize = desiredCanvasSize || canvasSize;
+      
+      // Only update canvas size if it has actually changed
+      if (engineRef.current.canvasWidth !== targetSize.width || engineRef.current.canvasHeight !== targetSize.height) {
+        engineRef.current.setCanvasSize(targetSize.width, targetSize.height);
+        console.log('[ForceFieldCanvas] Canvas size updated to:', targetSize.width, 'x', targetSize.height);
       }
+      
       // Ensure settings are up to date before updating particles
       engineRef.current.updateSettings(settings);
+      
+      // Update particles in the engine
       engineRef.current.updateParticlesFromStore(particles);
       
-      // Force an immediate draw of updated particles
-      if (canvasRef.current) {
-        const canvas = canvasRef.current;
-        const ctx = canvas.getContext('2d');
-        if (ctx) {
-          // Update canvas dimensions if they've changed
-          const targetSize = desiredCanvasSize || canvasSize;
-          if (canvas.width !== targetSize.width || canvas.height !== targetSize.height) {
-            canvas.width = targetSize.width;
-            canvas.height = targetSize.height;
-          }
-          
-          // Clear and draw particles immediately
-          const currentSettings = settings;
-          ctx.fillStyle = currentSettings.canvasBackgroundColor;
-          ctx.fillRect(0, 0, canvas.width, canvas.height);
-          
-          ctx.save();
-          ctx.globalAlpha = currentSettings.particleOpacity;
-          engineRef.current.drawParticles(ctx);
-          ctx.restore();
-        }
-      }
+      console.log('[ForceFieldCanvas] Particles updated:', particles.length, 'particles');
+      // Don't manually draw here - let the animation loop handle drawing
+      // Manual drawing causes blinking and conflicts with animation loop
     }
   }, [particles, desiredCanvasSize, canvasSize, settings]);
 
@@ -790,15 +775,9 @@ export function ForceFieldCanvas() {
             title={isRecording ? 'Stop Recording' : 'Start Recording'}
             onClick={() => {
               if (!isRecording) {
-                const { preset, width, height } = exportSettings;
-                let w = width, h = height;
-                if (preset !== 'custom') {
-                  if (preset === 'instagramReel') { w = 1080; h = 1920; }
-                  if (preset === 'youtube') { w = 1920; h = 1080; }
-                  if (preset === 'square') { w = 1080; h = 1080; }
-                  const img = useForceFieldStore.getState().particles?.[0];
-                }
-                setDesiredCanvasSize({ width: w, height: h });
+                // Just start recording - don't change canvas size
+                // The recording process will use exportSettings for output dimensions
+                // The canvas remains at its current size during recording
                 useForceFieldStore.getState().startRecording();
               } else {
                 useForceFieldStore.getState().stopRecording();
@@ -816,29 +795,39 @@ export function ForceFieldCanvas() {
           <Button
             size="sm"
             className="w-12 h-12 p-0 flex items-center justify-center rounded border bg-amber-600/70 hover:bg-amber-600/80 text-amber-100 border-amber-400/30"
-            title="Refresh Forcefield"
+            title="Refresh Forcefield - Regenerate particles from current image"
             onClick={() => {
               // Regenerate particles from the current uploaded image to fill the entire canvas
               if (engineRef.current && currentImageData) {
                 try {
-                  // Get current settings to check animation mode
+                  // Get current settings and canvas size
                   const currentSettings = settings;
+                  const targetSize = desiredCanvasSize || canvasSize;
+                  
+                  // Ensure canvas size is set in engine before regenerating
+                  // This is CRITICAL for canvas-based tile calculation
+                  if (engineRef.current.canvasWidth !== targetSize.width || engineRef.current.canvasHeight !== targetSize.height) {
+                    engineRef.current.setCanvasSize(targetSize.width, targetSize.height);
+                  }
                   
                   // Generate particles based on current animation mode
+                  // The engine now uses canvas dimensions internally for tile calculations
                   let newParticles;
                   if (currentSettings.animationMode === 'imageCrops') {
-                    // Use image crop tiles mode
+                    // Use image crop tiles mode with canvas-based sizing
                     newParticles = engineRef.current.generateParticlesFromImageTiles(
                       currentImageData, 
                       currentSettings.imageCropGridSize ?? 16, 
                       currentSettings.backgroundImage
                     );
+                    console.log(`[Canvas Refresh] Generated ${newParticles.length} image crop tiles for canvas ${targetSize.width}x${targetSize.height}`);
                   } else {
                     // Use regular particles mode
                     newParticles = engineRef.current.generateParticlesFromImage(
                       currentImageData, 
                       currentSettings.backgroundImage
                     );
+                    console.log(`[Canvas Refresh] Generated ${newParticles.length} particles`);
                   }
                   
                   // Update the store with new particles

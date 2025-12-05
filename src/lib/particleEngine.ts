@@ -48,29 +48,16 @@ export class ParticleEngine {
     const { width: imageWidth, height: imageHeight, data } = imageData;
     const particles: Particle[] = [];
     
-    // Calculate the scale to map canvas coordinates to image coordinates
-    const scale = this.settings.imageScale ?? 1;
-    
-    // Get background image transformations if provided
-    const bgScale = backgroundImage?.scale ?? 1;
-    const bgPositionX = backgroundImage?.positionX ?? 0;
-    const bgPositionY = backgroundImage?.positionY ?? 0;
-    const bgRotation = (backgroundImage?.rotation ?? 0) * Math.PI / 180; // Convert to radians
-    
-    // Calculate the effective particle system dimensions on canvas (scaled image area)
-    const scaledImageW = imageWidth * scale;
-    const scaledImageH = imageHeight * scale;
-    const offsetX = (this.canvasWidth - scaledImageW) / 2 + bgPositionX;
-    const offsetY = (this.canvasHeight - scaledImageH) / 2 + bgPositionY;
+    // FIXED: For regular particles, ignore background image properties
+    // Particles should fill the ENTIRE canvas uniformly
+    // Background image is only a visual overlay, not a constraint for particle sizing/positioning
     
     // Calculate particle spacing and size to ensure full canvas coverage
     // Goal: Generate approximately particleDensity particles that fill the canvas without gaps
     const canvasArea = this.canvasWidth * this.canvasHeight;
-    const aspectRatio = this.canvasWidth / this.canvasHeight;
     
     // Calculate spacing between particle centers based on desired density
     // For full coverage, we need particles to overlap slightly
-    // Spacing should be less than 2 * particleSize to ensure overlap
     const targetSpacing = Math.sqrt(canvasArea / this.settings.particleDensity);
     
     // Calculate number of particles per dimension to achieve target density
@@ -82,24 +69,19 @@ export class ParticleEngine {
     const actualSpacingY = this.canvasHeight / particlesPerCol;
     
     // Calculate particle size to ensure overlap and coverage
-    // For circles: diameter = 2 * radius, so we want 2 * size >= spacing for overlap
-    // For squares: side = 2 * size, so we want 2 * size >= spacing for overlap
-    // Use a factor to ensure good overlap - particles should overlap by at least 10-30%
-    // This ensures no gaps appear between particles
+    // Ensure particles overlap to eliminate gaps
     const maxSpacing = Math.max(actualSpacingX, actualSpacingY);
-    const overlapFactor = 1.3; // Ensures particles overlap by 30% to eliminate gaps
+    const overlapFactor = 1.3; // Ensures particles overlap by 30%
     const baseParticleSize = Math.max(2, Math.ceil(maxSpacing * overlapFactor / 2));
     
-    // Calculate total particles that will be generated
+    // Calculate total particles
     const totalParticles = particlesPerRow * particlesPerCol;
-    const expectedParticles = this.settings.particleDensity;
-    console.log(`Generating ${totalParticles} particles (${particlesPerRow}x${particlesPerCol}) with size ${baseParticleSize}, spacing ${actualSpacingX.toFixed(2)}x${actualSpacingY.toFixed(2)}, expected ~${expectedParticles}`);
+    console.log(`Generating ${totalParticles} particles (${particlesPerRow}x${particlesPerCol}) with size ${baseParticleSize}, spacing ${actualSpacingX.toFixed(2)}x${actualSpacingY.toFixed(2)}, expected ~${this.settings.particleDensity}`);
     
     // Generate particles with proper spacing to fill entire canvas
     for (let row = 0; row < particlesPerCol; row++) {
       for (let col = 0; col < particlesPerRow; col++) {
-        // Calculate particle position to evenly cover canvas from edge to edge
-        // Position particles at the center of each grid cell
+        // Calculate particle position to evenly cover canvas
         const canvasX = col * actualSpacingX + actualSpacingX / 2;
         const canvasY = row * actualSpacingY + actualSpacingY / 2;
         
@@ -107,57 +89,30 @@ export class ParticleEngine {
         const clampedCanvasX = Math.max(baseParticleSize, Math.min(canvasX, this.canvasWidth - baseParticleSize));
         const clampedCanvasY = Math.max(baseParticleSize, Math.min(canvasY, this.canvasHeight - baseParticleSize));
         
-        // If background image has rotation or scale, reverse-transform the canvas position to image space
-        let imageX: number, imageY: number;
+        // Map canvas coordinates to image coordinates for color sampling
+        // Use uniform scaling to maintain aspect ratio
+        const scale = Math.min(this.canvasWidth / imageWidth, this.canvasHeight / imageHeight);
+        const scaledImageW = imageWidth * scale;
+        const scaledImageH = imageHeight * scale;
+        const offsetX = (this.canvasWidth - scaledImageW) / 2;
+        const offsetY = (this.canvasHeight - scaledImageH) / 2;
         
-        if (bgScale !== 1 || bgRotation !== 0) {
-          // Reverse transform: canvas coords -> background image centered coords
-          const centerX = this.canvasWidth / 2;
-          const centerY = this.canvasHeight / 2;
-          
-          // Translate to origin
-          let dx = clampedCanvasX - centerX - bgPositionX;
-          let dy = clampedCanvasY - centerY - bgPositionY;
-          
-          // Reverse rotation
-          if (bgRotation !== 0) {
-            const cosR = Math.cos(-bgRotation);
-            const sinR = Math.sin(-bgRotation);
-            const dx2 = dx * cosR - dy * sinR;
-            const dy2 = dx * sinR + dy * cosR;
-            dx = dx2;
-            dy = dy2;
-          }
-          
-          // Reverse scale
-          if (bgScale !== 1) {
-            dx /= bgScale;
-            dy /= bgScale;
-          }
-          
-          // Map to image coordinates
-          const scaledImageW = imageWidth * scale;
-          const scaledImageH = imageHeight * scale;
-          imageX = Math.floor((dx + scaledImageW / 2) / scale);
-          imageY = Math.floor((dy + scaledImageH / 2) / scale);
-        } else {
-          // Simple case: no rotation or scale, just positional offset
-          imageX = Math.floor((clampedCanvasX - offsetX) / scale);
-          imageY = Math.floor((clampedCanvasY - offsetY) / scale);
-        }
+        // Map from canvas to image coordinates
+        let imageX = Math.floor((clampedCanvasX - offsetX) / scale);
+        let imageY = Math.floor((clampedCanvasY - offsetY) / scale);
         
         // Clamp to image bounds
-        const clampedX = Math.max(0, Math.min(imageX, imageWidth - 1));
-        const clampedY = Math.max(0, Math.min(imageY, imageHeight - 1));
+        imageX = Math.max(0, Math.min(imageX, imageWidth - 1));
+        imageY = Math.max(0, Math.min(imageY, imageHeight - 1));
         
         // Sample color from image
-        const index = (clampedY * imageWidth + clampedX) * 4;
+        const index = (imageY * imageWidth + imageX) * 4;
         const r = data[index];
         const g = data[index + 1];
         const b = data[index + 2];
         const color = `rgb(${r}, ${g}, ${b})`;
         
-        // Use calculated particle position and size
+        // Create particle
         particles.push({ 
           x: clampedCanvasX, 
           y: clampedCanvasY, 
@@ -1785,8 +1740,9 @@ export class ParticleEngine {
     const { width: imageWidth, height: imageHeight } = imageData;
     const particles: Particle[] = [];
 
-    // Generate tiles from the image using the proper tiling function
-    const tiles = generateTilesFromImage(imageData, gridSize);
+    // Generate tiles from the image using canvas dimensions for proper sizing
+    // Pass canvas width/height so tiles are calculated based on canvas, not image
+    const tiles = generateTilesFromImage(imageData, gridSize, this.canvasWidth, this.canvasHeight);
 
     if (tiles.length === 0) {
       console.warn('No tiles generated, falling back to default particles');
@@ -1794,45 +1750,31 @@ export class ParticleEngine {
     }
 
     // FIXED: Calculate positioning that maintains alignment with background image
-    // If background image exists, use its positioning; otherwise scale to fill canvas
-    let scaleX = 1;
-    let scaleY = 1;
+    // If background image exists, use its positioning; otherwise use canvas directly
     let offsetX = 0;
     let offsetY = 0;
 
     if (backgroundImage && backgroundImage.originalWidth && backgroundImage.originalHeight) {
-      // Background image exists - match its positioning exactly
-      const bgScaleX = this.canvasWidth / backgroundImage.originalWidth;
-      const bgScaleY = this.canvasHeight / backgroundImage.originalHeight;
-      
-      // Use the same scaling that background image uses
-      const bgScale = backgroundImage.scale || 1;
-      scaleX = bgScaleX * bgScale;
-      scaleY = bgScaleY * bgScale;
-      
-      // Apply background image positioning
+      // Background image exists - apply its positioning offset
       offsetX = backgroundImage.positionX || 0;
       offsetY = backgroundImage.positionY || 0;
       
-      console.log(`[ImageTiles] Matching background positioning: scale=${bgScale.toFixed(3)}, offset=(${offsetX}, ${offsetY})`);
-    } else {
-      // No background image - scale to fill canvas while maintaining aspect ratio
-      scaleX = this.canvasWidth / imageWidth;
-      scaleY = this.canvasHeight / imageHeight;
-      
-      console.log(`[ImageTiles] Scaling to fill canvas: scaleX=${scaleX.toFixed(3)}, scaleY=${scaleY.toFixed(3)}`);
+      console.log(`[ImageTiles] Applying background image offset: (${offsetX}, ${offsetY})`);
     }
 
-    // Use the tiles with their correct grid positions (gridX, gridY)
+    // Use the tiles with their canvas-based grid positions
+    // Tiles are already positioned for the canvas, so we just need to offset if background image is present
     for (const tile of tiles) {
-      // Calculate tile position based on its ACTUAL pixel position in the source image
-      // Scale and offset to match background image positioning
-      const canvasX = (tile.pixelX + tile.imageData.width / 2) * scaleX + offsetX;
-      const canvasY = (tile.pixelY + tile.imageData.height / 2) * scaleY + offsetY;
-
-      // Calculate tile size based on actual tile dimensions scaled to canvas
-      const tileWidth = tile.imageData.width * scaleX;
-      const tileHeight = tile.imageData.height * scaleY;
+      // Tiles now have pixelX/pixelY as canvas coordinates
+      // They need no scaling - they're already sized for the canvas
+      
+      // Calculate tile center (using stored tile dimensions which may be partial for edges)
+      const tileWidth = tile.imageData.width;
+      const tileHeight = tile.imageData.height;
+      
+      // Place particle at tile center, accounting for background offset
+      const canvasX = tile.pixelX + tileWidth / 2 + offsetX;
+      const canvasY = tile.pixelY + tileHeight / 2 + offsetY;
 
       const particle: Particle = {
         x: canvasX,
@@ -1855,7 +1797,7 @@ export class ParticleEngine {
       particles.push(particle);
     }
 
-    console.log(`Generated ${particles.length} tile particles with perfect alignment to background image`);
+    console.log(`Generated ${particles.length} tile particles, canvas=${this.canvasWidth}x${this.canvasHeight}, tiles fully cover canvas`);
     return particles;
   }
 } 
